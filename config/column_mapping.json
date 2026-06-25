@@ -1,0 +1,19 @@
+{
+  "sheet_name": 0,
+  "required_headers": [
+    "Security Description",
+    "Ticker",
+    "NEW WEIGHT"
+  ],
+  "columns": {
+    "security_description": "Security Description",
+    "raw_ticker": "Ticker",
+    "cusip": "CUSIP",
+    "weight": "NEW WEIGHT",
+    "previous_weight": "PREVIOUS WEIGHT",
+    "weight_change": "Changes",
+    "action": "INSTRUCTION"
+  },
+  "weight_input": "percent",
+  "weight_change_input": "percent"
+}
