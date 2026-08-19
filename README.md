@@ -6,7 +6,7 @@
 
 **A privacy-first Python data pipeline and Streamlit dashboard for independently auditing a separately managed account.** It converts periodic Excel model updates and stored market data into a reproducible CAD performance record, holdings view, trade log, risk dashboard, valuation overview, and portfolio assistant.
 
-[Explore the live synthetic demo](https://sma-dashboard.streamlit.app) · [Review the methodology](docs/METHODOLOGY.md) · [See the architecture](docs/ARCHITECTURE.md)
+[Run the synthetic demo](#run-the-synthetic-demo-locally) · [Review the methodology](docs/METHODOLOGY.md) · [See the architecture](docs/ARCHITECTURE.md)
 
 ![SMA Dashboard overview](docs/images/dashboard-overview.png)
 
@@ -27,7 +27,7 @@ The result is less about another charting app and more about trustworthy analyti
 
 ## 60-second tour
 
-1. Open the [live demo](https://sma-dashboard.streamlit.app); the database is built locally from deterministic synthetic fixtures.
+1. [Run the synthetic demo](#run-the-synthetic-demo-locally); the database is built locally from deterministic synthetic fixtures.
 2. Review cumulative performance, trailing returns, drawdowns, and rolling risk against the S&P/TSX Composite.
 3. Inspect holdings, weight drift, valuation, model-update history, and the normalized trade log.
 4. Ask the offline assistant “What are the largest holdings?”, “How has the portfolio performed?”, or “Summarize the latest manager commentary.”
