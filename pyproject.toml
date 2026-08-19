@@ -1,6 +1,6 @@
 [project]
 name = "sma-dashboard"
-version = "0.3.0"
+version = "0.3.1"
 description = "Privacy-first SMA oversight dashboard with reproducible CAD performance analytics."
 requires-python = ">=3.11"
 dependencies = [

@@ -53,7 +53,8 @@ class DemoDatabaseTests(unittest.TestCase):
                 clear=False,
             ),
         ):
-            app = AppTest.from_file("dashboard.py").run(timeout=60)
+            dashboard_path = Path(__file__).resolve().parents[1] / "dashboard.py"
+            app = AppTest.from_file(dashboard_path).run(timeout=60)
 
         self.assertEqual([str(item.value) for item in app.exception], [])
         self.assertIn("SMA Dashboard", [item.value for item in app.title])

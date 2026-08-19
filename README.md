@@ -1,14 +1,75 @@
 # SMA Oversight Dashboard
 
 [![Tests](https://github.com/bran-hub/sma-dashboard/actions/workflows/tests.yml/badge.svg)](https://github.com/bran-hub/sma-dashboard/actions/workflows/tests.yml)
-![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![Python](https://img.shields.io/badge/python-3.11%E2%80%933.13-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A privacy-first Streamlit dashboard for independently auditing a separately managed account. It turns periodic model updates and market data into a reproducible CAD performance record, holdings view, trade log, risk dashboard, valuation overview, and optional portfolio assistant.
+**A privacy-first Python data pipeline and Streamlit dashboard for independently auditing a separately managed account.** It converts periodic Excel model updates and stored market data into a reproducible CAD performance record, holdings view, trade log, risk dashboard, valuation overview, and portfolio assistant.
 
-The repository is a synthetic portfolio project: no real holdings, account files, manager reports, returns, or credentials are included.
+[Explore the live synthetic demo](https://sma-dashboard.streamlit.app) · [Review the methodology](docs/METHODOLOGY.md) · [See the architecture](docs/ARCHITECTURE.md)
 
-## Try the synthetic demo
+![SMA Dashboard overview](docs/images/dashboard-overview.png)
+
+> All holdings, trades, prices, returns, and commentary in the public project are fictional. No real account files, credentials, or manager information are included.
+
+## Why I built it
+
+Manager reporting is useful, but it is not an independent source of truth. I built this project end to end to demonstrate how I would turn irregular portfolio updates into an auditable analytical product: validate inputs, preserve lineage, make timing and currency rules explicit, calculate performance reproducibly, and surface the results for review.
+
+The result is less about another charting app and more about trustworthy analytics engineering:
+
+- Atomic, idempotent Excel-to-SQLite ingestion with rejected-row auditing.
+- Explicit CAD/USD security currency and local overrides for ambiguous symbols.
+- CAD time-weighted returns with next-trading-day snapshot effectiveness.
+- Buy-and-hold weight drift between snapshots and explicit residual cash.
+- Deterministic synthetic data and offline assistant answers with no API key.
+- 222 automated tests across Python 3.11, 3.12, and 3.13.
+
+## 60-second tour
+
+1. Open the [live demo](https://sma-dashboard.streamlit.app); the database is built locally from deterministic synthetic fixtures.
+2. Review cumulative performance, trailing returns, drawdowns, and rolling risk against the S&P/TSX Composite.
+3. Inspect holdings, weight drift, valuation, model-update history, and the normalized trade log.
+4. Ask the offline assistant “What are the largest holdings?”, “How has the portfolio performed?”, or “Summarize the latest manager commentary.”
+
+The demo contains 16 holdings rows, 12 trades, 1,840 stored price observations, 368 FX observations, 13 seeded monthly returns, and one synthetic manager transcript.
+
+## Data flow
+
+```mermaid
+flowchart LR
+    A[Excel model updates] --> B[Parse and validate in memory]
+    B --> C{Valid?}
+    C -->|No| D[Rejected-row audit]
+    C -->|Yes| E[Atomic SQLite transaction]
+    F[Prices and FX] --> E
+    E --> G[CAD performance and risk engine]
+    E --> H[Holdings, trades, valuation]
+    E --> I[Deterministic portfolio tools]
+    G --> J[Streamlit dashboard]
+    H --> J
+    I --> J
+```
+
+| Layer | Implementation |
+|---|---|
+| Ingestion | pandas, openpyxl, configurable mappings, transactional writes |
+| Storage | SQLite as the reproducible local source of truth |
+| Analytics | CAD TWR, benchmark comparison, trailing returns, rolling risk |
+| Interface | Streamlit and Altair |
+| Quality | pytest and GitHub Actions on Python 3.11–3.13 |
+
+See [Architecture](docs/ARCHITECTURE.md), [Methodology](docs/METHODOLOGY.md), [Privacy](docs/PRIVACY.md), and [Roadmap](docs/ROADMAP.md).
+
+## Key engineering decisions
+
+- **SQLite over flat files:** lightweight and local, while preserving queryability, constraints, and reproducible history.
+- **TWR over IRR:** measures manager decisions without conflating them with the timing of account contributions and withdrawals.
+- **Next-observed-day effectiveness:** prevents a new holdings snapshot from creating same-day look-ahead bias.
+- **Stored prices and FX:** calculations can be reproduced instead of silently changing with each market-data request.
+- **Synthetic hosted mode:** lets reviewers use the complete stored-data path without exposing private data or relying on live services.
+
+## Run the synthetic demo locally
 
 ```powershell
 python -m venv .venv
@@ -17,30 +78,7 @@ python -m pip install -e ".[dev]"
 python run_demo.py
 ```
 
-`run_demo.py` deterministically builds `data/db/sma_demo.db` and launches Streamlit without downloading market data. The generated holdings, trades, prices, FX rates, returns, and manager transcript are fictional and safe to regenerate or delete. The assistant starts in offline mock mode and needs no API key.
-
-## What it demonstrates
-
-- Atomic, idempotent workbook ingestion with rejected-row auditing.
-- Explicit CAD/USD security currency, including local overrides for ambiguous symbols.
-- CAD time-weighted returns, a Canadian equity benchmark, trailing returns, and rolling risk metrics.
-- Holdings snapshots that become effective on the next observed trading day.
-- Buy-and-hold weight drift between snapshots, with residual cash treated as zero-return exposure.
-- Local SQLite storage and a Streamlit UI with clear missing-data states.
-- Optional live valuation and news enrichment through yfinance.
-- Deterministic portfolio questions over synthetic holdings, trades, performance, and commentary, with optional Anthropic tool-calling mode.
-
-## Architecture
-
-| Layer | Implementation |
-|---|---|
-| UI | Streamlit and Altair |
-| Analytics | pandas-based CAD TWR and risk calculations |
-| Storage | SQLite |
-| Inputs | Excel model updates, seeded return CSVs, yfinance |
-| Quality | pytest and GitHub Actions on Python 3.11/3.12 |
-
-See [Architecture](docs/ARCHITECTURE.md), [Methodology](docs/METHODOLOGY.md), [Privacy](docs/PRIVACY.md), and [Roadmap](docs/ROADMAP.md).
+`run_demo.py` builds `data/db/sma_demo.db` and launches Streamlit without downloading market data. The assistant starts in offline mock mode and needs no API key.
 
 ## Use with private local data
 
@@ -61,18 +99,7 @@ python ingestion.py `
   --ticker-currency-overrides config/ticker_currency_overrides.local.json
 ```
 
-Use `--skip-market-data` for offline parsing and validation. Re-running an applied model date is rejected by default; use `--replace-date` only for an intentional atomic replacement.
-
-Load a sequence from a private manifest:
-
-```powershell
-python ingest_model_updates.py `
-  --manifest data/raw/model_updates_manifest.csv `
-  --db data/db/sma_dashboard.db `
-  --config config/column_mapping.json `
-  --ticker-overrides config/ticker_overrides.local.json `
-  --ticker-currency-overrides config/ticker_currency_overrides.local.json
-```
+Use `--skip-market-data` for offline validation. Re-running an applied model date is rejected by default; use `--replace-date` only for an intentional atomic replacement. Ordered batch ingestion is also available through `ingest_model_updates.py` and a private manifest.
 
 Run the app:
 
@@ -94,26 +121,22 @@ $env:SMA_CHAT_MODE = "anthropic"
 streamlit run dashboard.py
 ```
 
-Copy `.streamlit/secrets.toml.example` to the ignored `.streamlit/secrets.toml` and add `ANTHROPIC_API_KEY`. Live mode may send the user's question and tool results to Anthropic; review the data-sharing implications before enabling it. The API key is never required for the demo or CI.
+Copy `.streamlit/secrets.toml.example` to the ignored `.streamlit/secrets.toml` and add `ANTHROPIC_API_KEY`. Live mode may send the question and tool results to Anthropic; review the data-sharing implications before enabling it. The API key is never required for the demo or CI.
 
-## Methodology in brief
+## Methodology and limitations
 
-Performance is daily, CAD-denominated time-weighted return. A holdings snapshot dated on day _t_ is applied starting with the next observed trading day, preventing same-day look-ahead. Target weights initialize the portfolio at each new snapshot; security weights then drift with relative returns until the next snapshot. Weight below 100% is residual cash earning 0%; long-only snapshots above 100% are rejected. Missing prices or required FX rates are surfaced rather than silently dropping and renormalizing positions.
+Performance is daily, CAD-denominated time-weighted return. Target weights initialize the portfolio at each new snapshot, then drift with relative returns until the next snapshot. Weight below 100% is residual cash earning 0%; long-only snapshots above 100% are rejected. Missing prices or required FX rates are surfaced rather than silently dropping and renormalizing positions.
 
-This is an oversight and software-engineering project, not brokerage, accounting, tax, or investment-advice software. yfinance data is convenient for demonstration but does not carry production service guarantees.
+This is an oversight and analytics-engineering portfolio project—not brokerage, accounting, tax, or investment-advice software. yfinance is convenient for demonstration but does not carry production service guarantees.
 
-## Tests
+## Quality and privacy
 
 ```powershell
 python -m pytest
 python -m sma_dashboard.demo --output data/db/demo-smoke.db
 ```
 
-The suite covers schema migrations, ingestion rollback/idempotency, currency classification, performance timing and drift, valuation, dashboard helpers, transcripts, and the optional assistant tools.
-
-## Privacy
-
-Keep real inputs in ignored paths such as `data/raw/`, `data/db/`, `.streamlit/secrets.toml`, and local override files. Public releases are produced through an allowlisted export with filename/content deny checks; private development history is never merged into the public repository. See [Privacy](docs/PRIVACY.md).
+Real inputs belong only in ignored paths such as `data/raw/`, `data/db/`, `.streamlit/secrets.toml`, and local override files. Public releases are produced through an allowlisted export with filename/content deny checks; private development history is never merged into the public repository. See [Privacy](docs/PRIVACY.md).
 
 ## License
 

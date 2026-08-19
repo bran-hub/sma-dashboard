@@ -4,7 +4,6 @@ __pycache__/
 .venv/
 .env
 .tmp/
-docs/images/dashboard-overview.png
 .coverage
 build/
 dist/

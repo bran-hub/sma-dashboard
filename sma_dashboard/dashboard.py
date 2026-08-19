@@ -79,6 +79,12 @@ def run_app() -> None:
     db_path = controls["db_path"]
     demo_mode = os.environ.get("SMA_DEMO_MODE", "0") == "1"
 
+    if demo_mode:
+        st.info(
+            "Synthetic portfolio demonstration — all holdings, trades, prices, "
+            "returns, and commentary are fictional."
+        )
+
     validation = validate_dashboard_database(db_path)
     if not validation.is_valid:
         _render_database_setup_warning(validation)
@@ -97,11 +103,19 @@ def run_app() -> None:
 
 
 def _sidebar_controls() -> dict[str, object]:
+    demo_mode = os.environ.get("SMA_DEMO_MODE", "0") == "1"
     with st.sidebar:
         st.header("Controls")
-        db_path_text = st.text_input("SQLite database path", value=str(DASHBOARD_DEFAULT_DB_PATH.relative_to(DASHBOARD_DEFAULT_DB_PATH.parents[2])))
-        resolved_db_path = resolve_dashboard_db_path(db_path_text)
-        st.caption(f"Resolved DB: {resolved_db_path}")
+        if demo_mode:
+            resolved_db_path = DASHBOARD_DEFAULT_DB_PATH.resolve()
+            st.caption("Deterministic synthetic demo database")
+        else:
+            db_path_text = st.text_input(
+                "SQLite database path",
+                value=str(DASHBOARD_DEFAULT_DB_PATH.relative_to(DASHBOARD_DEFAULT_DB_PATH.parents[2])),
+            )
+            resolved_db_path = resolve_dashboard_db_path(db_path_text)
+            st.caption(f"Resolved DB: {resolved_db_path}")
         benchmark = st.text_input("Benchmark ticker", value=BENCHMARK_TICKER)
         starting_capital_input = st.number_input(
             "Starting Capital (CAD)",
@@ -117,9 +131,12 @@ def _sidebar_controls() -> dict[str, object]:
         if use_date_filter:
             start_date = st.date_input("Start date", value=None)
             end_date = st.date_input("End date", value=None)
-        demo_mode = os.environ.get("SMA_DEMO_MODE", "0") == "1"
-        auto_refresh = st.checkbox("Auto-refresh market data on launch", value=not demo_mode)
-        refresh = st.button("Refresh market data now")
+        if demo_mode:
+            auto_refresh = False
+            refresh = False
+        else:
+            auto_refresh = st.checkbox("Auto-refresh market data on launch", value=True)
+            refresh = st.button("Refresh market data now")
     return {
         "db_path": resolved_db_path,
         "benchmark": benchmark.strip() or BENCHMARK_TICKER,
@@ -169,9 +186,10 @@ def _render_market_data_refresh(db_path: Path, controls: dict[str, object]) -> N
             "Current holdings missing stored prices: "
             + ", ".join(freshness.missing_current_holding_price_tickers)
         )
-    notice = pending_model_update_notice(db_path)
-    if notice:
-        st.info(notice)
+    if os.environ.get("SMA_DEMO_MODE", "0") != "1":
+        notice = pending_model_update_notice(db_path)
+        if notice:
+            st.info(notice)
 
 
 def _render_refresh_summary(summary) -> None:
@@ -645,6 +663,11 @@ def _render_chat(db_path: Path) -> None:
         st.caption("Live Anthropic mode. Portfolio tools read the selected local database.")
     else:
         st.caption("Offline mock mode: deterministic answers from synthetic local data; no API key or network call.")
+        st.markdown(
+            "Try: **What are the largest holdings?** · "
+            "**How has the portfolio performed?** · "
+            "**Summarize the latest manager commentary.**"
+        )
 
     # --- Session state init ---
     if "chat_display" not in st.session_state:

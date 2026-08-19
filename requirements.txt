@@ -1,0 +1,6 @@
+# Reproducible direct dependencies for the hosted synthetic demo.
+altair==6.2.2
+openpyxl==3.1.5
+pandas==3.0.5
+streamlit==1.61.1
+yfinance==1.6.0
