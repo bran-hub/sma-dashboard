@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A privacy-first Streamlit dashboard for independently auditing a separately managed account. It turns periodic model updates and market data into a reproducible CAD performance record, holdings view, trade log, risk dashboard, and valuation overview.
+A privacy-first Streamlit dashboard for independently auditing a separately managed account. It turns periodic model updates and market data into a reproducible CAD performance record, holdings view, trade log, risk dashboard, valuation overview, and optional portfolio assistant.
 
 The repository is a synthetic portfolio project: no real holdings, account files, manager reports, returns, or credentials are included.
 
@@ -17,7 +17,7 @@ python -m pip install -e ".[dev]"
 python run_demo.py
 ```
 
-`run_demo.py` deterministically builds `data/db/sma_demo.db` and launches Streamlit without downloading market data. The generated holdings, trades, prices, FX rates, and returns are fictional and safe to regenerate or delete.
+`run_demo.py` deterministically builds `data/db/sma_demo.db` and launches Streamlit without downloading market data. The generated holdings, trades, prices, FX rates, returns, and manager transcript are fictional and safe to regenerate or delete. The assistant starts in offline mock mode and needs no API key.
 
 ## What it demonstrates
 
@@ -28,6 +28,7 @@ python run_demo.py
 - Buy-and-hold weight drift between snapshots, with residual cash treated as zero-return exposure.
 - Local SQLite storage and a Streamlit UI with clear missing-data states.
 - Optional live valuation and news enrichment through yfinance.
+- Deterministic portfolio questions over synthetic holdings, trades, performance, and commentary, with optional Anthropic tool-calling mode.
 
 ## Architecture
 
@@ -79,6 +80,21 @@ Run the app:
 $env:SMA_DASHBOARD_DB = "data/db/sma_dashboard.db"
 streamlit run dashboard.py
 ```
+
+## Optional portfolio assistant
+
+The public demo uses `SMA_CHAT_MODE=mock`: questions are classified locally and answered by deterministic Python tools against the selected SQLite database. No prompt or portfolio data leaves the machine.
+
+For opt-in live Anthropic mode:
+
+```powershell
+python -m pip install -e ".[chatbot]"
+$env:SMA_ENABLE_CHAT = "1"
+$env:SMA_CHAT_MODE = "anthropic"
+streamlit run dashboard.py
+```
+
+Copy `.streamlit/secrets.toml.example` to the ignored `.streamlit/secrets.toml` and add `ANTHROPIC_API_KEY`. Live mode may send the user's question and tool results to Anthropic; review the data-sharing implications before enabling it. The API key is never required for the demo or CI.
 
 ## Methodology in brief
 

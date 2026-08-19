@@ -619,7 +619,7 @@ def _render_news(db_path: Path, include_live_data: bool = True) -> None:
 
 
 def _render_chat(db_path: Path) -> None:
-    """Render the M5 chatbot panel using the Anthropic tool-calling agent loop.
+    """Render the offline demo assistant or optional Anthropic agent.
 
     Conversation history is stored in st.session_state so it persists across
     Streamlit reruns. Charts emitted via render_chart are stored in session
@@ -627,16 +627,24 @@ def _render_chat(db_path: Path) -> None:
     """
     st.header("Portfolio Assistant")
 
-    # --- API key from st.secrets ---
-    api_key: str | None = None
-    try:
-        api_key = st.secrets["ANTHROPIC_API_KEY"]
-    except (KeyError, FileNotFoundError):
-        st.info(
-            "Chatbot requires an Anthropic API key. "
-            "Add `ANTHROPIC_API_KEY = '...'` to `.streamlit/secrets.toml`."
-        )
+    chat_mode = os.environ.get("SMA_CHAT_MODE", "mock").strip().lower()
+    if chat_mode not in {"mock", "anthropic"}:
+        st.warning("SMA_CHAT_MODE must be 'mock' or 'anthropic'.")
         return
+
+    api_key: str | None = None
+    if chat_mode == "anthropic":
+        try:
+            api_key = st.secrets["ANTHROPIC_API_KEY"]
+        except (KeyError, FileNotFoundError):
+            st.info(
+                "Anthropic mode requires an API key. "
+                "Add `ANTHROPIC_API_KEY = '...'` to `.streamlit/secrets.toml`."
+            )
+            return
+        st.caption("Live Anthropic mode. Portfolio tools read the selected local database.")
+    else:
+        st.caption("Offline mock mode: deterministic answers from synthetic local data; no API key or network call.")
 
     # --- Session state init ---
     if "chat_display" not in st.session_state:
@@ -669,13 +677,20 @@ def _render_chat(db_path: Path) -> None:
     with st.chat_message("assistant"):
         with st.spinner("Thinking…"):
             try:
-                from sma_dashboard.chatbot import run_agent_loop
-                response, updated_messages = run_agent_loop(
-                    user_message=user_input,
-                    messages_history=st.session_state["api_messages"],
-                    db_path=db_path,
-                    api_key=api_key,
-                )
+                from sma_dashboard.chatbot import run_agent_loop, run_mock_agent_loop
+                if chat_mode == "mock":
+                    response, updated_messages = run_mock_agent_loop(
+                        user_message=user_input,
+                        messages_history=st.session_state["api_messages"],
+                        db_path=db_path,
+                    )
+                else:
+                    response, updated_messages = run_agent_loop(
+                        user_message=user_input,
+                        messages_history=st.session_state["api_messages"],
+                        db_path=db_path,
+                        api_key=api_key,
+                    )
             except Exception as exc:
                 st.error(f"Agent error: {exc}")
                 return

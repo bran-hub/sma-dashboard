@@ -98,6 +98,15 @@ def build_demo_database(output_path: Path | str = DEFAULT_DEMO_DB) -> Path:
                 for index, timestamp in enumerate(price_dates)
             ],
         )
+        transcript_path = PROJECT_ROOT / "sample_data" / "2025_Q1_call.txt"
+        if transcript_path.exists():
+            conn.execute(
+                """
+                INSERT INTO transcripts (date, quarter_label, full_text, notes)
+                VALUES ('2025-03-28', '2025_Q1', ?, 'Synthetic demo transcript')
+                """,
+                (transcript_path.read_text(encoding="utf-8"),),
+            )
         conn.commit()
     conn.close()
 

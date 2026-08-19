@@ -12,7 +12,8 @@ def main() -> None:
     env = os.environ.copy()
     env["SMA_DASHBOARD_DB"] = str(demo_db)
     env["SMA_DEMO_MODE"] = "1"
-    env["SMA_ENABLE_CHAT"] = "0"
+    env["SMA_ENABLE_CHAT"] = "1"
+    env["SMA_CHAT_MODE"] = "mock"
     subprocess.run([sys.executable, "-m", "streamlit", "run", "dashboard.py"], check=True, env=env)
 
 

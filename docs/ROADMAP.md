@@ -9,9 +9,9 @@
 
 ## v0.3 — optional portfolio assistant
 
-- Offline mock assistant for a no-key demo.
-- Optional Anthropic tool-calling mode installed through the `chatbot` extra.
-- Synthetic transcript ingestion and transcript-aware questions.
+- Offline mock assistant for a no-key demo. ✓
+- Optional Anthropic tool-calling mode installed through the `chatbot` extra. ✓
+- Synthetic transcript ingestion and transcript-aware questions. ✓
 
 ## Later
 

@@ -26,7 +26,7 @@ class DemoDatabaseTests(unittest.TestCase):
         try:
             counts = {
                 table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                for table in ("seeded_returns", "holdings", "trades", "prices", "fx_rates")
+                for table in ("seeded_returns", "holdings", "trades", "prices", "fx_rates", "transcripts")
             }
         finally:
             conn.close()
@@ -35,6 +35,7 @@ class DemoDatabaseTests(unittest.TestCase):
         self.assertGreater(counts["trades"], 0)
         self.assertGreater(counts["prices"], 1000)
         self.assertGreater(counts["fx_rates"], 250)
+        self.assertEqual(counts["transcripts"], 1)
 
         returns = calculate_daily_portfolio_returns(path)
         rolling = calculate_rolling_metrics(returns, db_path=path, window=252)
@@ -48,7 +49,7 @@ class DemoDatabaseTests(unittest.TestCase):
             patch.object(dashboard_support_module, "DASHBOARD_DEFAULT_DB_PATH", path),
             patch.dict(
                 "os.environ",
-                {"SMA_DEMO_MODE": "1", "SMA_ENABLE_CHAT": "0"},
+                {"SMA_DEMO_MODE": "1", "SMA_ENABLE_CHAT": "1", "SMA_CHAT_MODE": "mock"},
                 clear=False,
             ),
         ):
@@ -57,3 +58,7 @@ class DemoDatabaseTests(unittest.TestCase):
         self.assertEqual([str(item.value) for item in app.exception], [])
         self.assertIn("SMA Dashboard", [item.value for item in app.title])
         self.assertGreaterEqual(len(app.dataframe), 6)
+        self.assertTrue(
+            any("Offline mock mode" in item.value for item in app.caption),
+            "The synthetic dashboard should expose the no-key assistant mode.",
+        )

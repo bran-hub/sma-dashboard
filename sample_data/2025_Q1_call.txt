@@ -1,0 +1,37 @@
+SYNTHETIC DEMO TRANSCRIPT — FICTIONAL DATA ONLY
+SMA Quarterly Manager Call — Q1 2025
+Date: March 28, 2025
+Participants: Portfolio Manager (PM), Analyst Team
+
+---
+
+PM: Good morning everyone. Let me walk through our Q1 positioning and some of the key decisions we made this quarter.
+
+Starting with the Canadian banks. We trimmed Royal Bank slightly after the strong run in Q4. Our thesis on the banks remains intact — credit quality is holding up better than feared given the rate environment, and we expect net interest margins to remain supportive through the first half. We still hold meaningful positions in RY and TD.
+
+On the technology side, we added to Shopify during the February pullback. The market was spooked by slowing GMV growth guidance, but we think the operating leverage story is still early innings. The international expansion into EMEA is progressing ahead of internal estimates. That said, we remain cautious about near-term multiple compression if the broader tech selloff continues.
+
+Analyst: Can you speak to the macro backdrop and how it's affecting your sector allocations?
+
+PM: Sure. The Bank of Canada held rates in January and March, which is consistent with our base case that we're at peak rates. We've been gradually adding interest-rate-sensitive names — utilities and pipelines — as a hedge. Pembina Pipeline and Fortis both look attractive at current levels given their dividend coverage and the rate outlook.
+
+On the energy side, we reduced our oil sands exposure. Canadian Natural Resources was a great performer for us in 2024, but the differential widening on heavy crude and the upcoming TMX volumes create some uncertainty on near-term realizations. We rotated some of that into Tourmaline, which has better gas leverage and lower royalty structure.
+
+Analyst: What's your view on Canadian consumer names heading into Q2?
+
+PM: We're cautious. The consumer is under real pressure from mortgage renewals and the accumulated impact of higher rates. We don't hold any of the major grocery names — Loblaw or Metro — at the moment. We exited those in Q4 when valuations looked stretched relative to organic growth. Dollarama remains our main consumer holding; it continues to trade at a premium but the unit economics and same-store sales hold up across economic cycles better than traditional grocery.
+
+On the industrial side, we initiated a position in TFI International. The cross-border trucking softness has weighed on the stock, but management has a long track record of margin improvement through M&A integration. We see this as a 12-18 month recovery story.
+
+PM: Wrapping up — the portfolio is positioned defensively relative to the index. We're overweight financials and pipelines, underweight energy and consumer. Cash is around 3%, which is near the top of our normal range. We'll deploy that if we see a 5-8% market correction, which we think is possible in Q2 given the macro crosscurrents.
+
+Any other questions?
+
+Analyst: Any thoughts on the TSX relative to the S&P 500 this year?
+
+PM: The TSX has been a relative laggard YTD given the tech weighting in the S&P. We think that gap narrows in H2 as commodity prices stabilize and Canadian rate cuts begin. The currency is a wildcard — if USD strengthens further on tariff fears, USD-denominated returns for Canadian investors will look worse. We're fully hedged on our USD positions back to CAD.
+
+Thank you everyone. We'll follow up in writing with the full attribution for Q1.
+
+---
+End of call.

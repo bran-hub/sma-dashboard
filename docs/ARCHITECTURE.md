@@ -20,8 +20,10 @@ The dashboard is a local-first Python application. Private files stay on the use
 | `sma_dashboard/valuation.py` | Holding and weighted portfolio valuation |
 | `sma_dashboard/news.py` | Holding-level news enrichment |
 | `sma_dashboard/demo.py` | Deterministic synthetic demo database |
+| `sma_dashboard/transcripts.py` | Local transcript storage and retrieval |
+| `sma_dashboard/chatbot.py` | Offline mock answers and optional Anthropic tool loop |
 | `sma_dashboard/dashboard.py` | Streamlit presentation |
 
 ## Boundaries
 
-SQLite is the reproducible local source of truth. Network access is confined to explicit market-data enrichment. The synthetic demo follows the complete stored-data path and requires no network calls.
+SQLite is the reproducible local source of truth. Network access is confined to explicit market-data enrichment and opt-in Anthropic mode. The synthetic demo follows the complete stored-data path and requires no network calls.
