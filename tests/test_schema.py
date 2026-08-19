@@ -38,6 +38,7 @@ class SchemaTests(unittest.TestCase):
                 "corporate_actions",
                 "transcripts",
                 "rejected_rows",
+                "model_updates_applied",
             }.issubset(tables)
         )
 
@@ -54,6 +55,15 @@ class SchemaTests(unittest.TestCase):
             conn.close()
 
         self.assertIn("benchmark_return_pct", columns)
+
+    def test_holdings_schema_includes_explicit_currency(self) -> None:
+        init_db(TEST_DB)
+        conn = sqlite3.connect(TEST_DB)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(holdings)")}
+        finally:
+            conn.close()
+        self.assertIn("currency", columns)
 
     def test_init_db_migrates_existing_seeded_returns_table_idempotently(self) -> None:
         TEST_DB.parent.mkdir(parents=True, exist_ok=True)

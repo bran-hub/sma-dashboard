@@ -1,33 +1,24 @@
-# Privacy
+# Privacy and public-release policy
 
-This repository is prepared as a public portfolio package. It should contain source code, tests, documentation, configuration templates, and synthetic examples only.
+Only source code, tests, documentation, configuration templates, and clearly synthetic examples belong in the public repository.
 
-## Do Not Commit
+## Never publish
 
-- Real model-update workbooks.
-- Private seeded returns files.
-- Local SQLite databases.
-- Local ticker override files.
-- `.env` files.
-- Streamlit secrets.
-- Private holdings, weights, returns, account details, or manager commentary.
+- Real model-update workbooks, holdings, weights, returns, account identifiers, or manager commentary.
+- SQLite databases, raw exports, local manifests, or audit reports.
+- `.env` files, API keys, Streamlit secrets, or local override files.
+- Private repository history.
 
-## Ignored Local Paths
-
-Private local files should remain in ignored paths:
+## Local-only locations
 
 - `data/raw/`
 - `data/db/`
-- `config/ticker_overrides.local.json`
-- `.env` / `.env.*`
+- `config/*.local.json`
 - `.streamlit/secrets.toml`
+- `.env` and `.env.*`
 
-The `.gitkeep` files under `data/raw/` and `data/db/` exist only to preserve the directory structure.
+## Release process
 
-## Public Examples
+`tools/export_public_release.py` copies only an explicit allowlist into a clean packaging worktree or public repository. It refuses dirty source/target repositories, removes files outside the allowlist from the target, scans names and text for denied private references and likely secrets, and never copies Git history.
 
-Examples committed to this repo should be synthetic and clearly labeled as examples. Filenames should use neutral placeholders such as `manager_model_update_YYYY-MM-DD.xlsx` rather than names from a real manager or account.
-
-## Clean-History Publishing
-
-This worktree is intended to prepare files that can later be copied into a separate clean-history public repository. The existing private development history should not be assumed safe for public release.
+Synthetic examples must be labeled as synthetic and use fictional data. A public release is validated again from the destination repository before it is tagged.

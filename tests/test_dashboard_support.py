@@ -4,6 +4,7 @@ import sqlite3
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -31,13 +32,17 @@ from sma_dashboard.dashboard_support import (
     format_valuation_table,
     format_weighted_valuation_averages,
     get_calculated_benchmark_price_coverage,
+    get_dashboard_freshness,
     get_observed_chart_dates,
     get_range_start_date,
     label_for,
     list_trade_filter_values,
     load_trade_log,
     normalize_starting_capital,
+    pending_model_update_notice,
+    prepare_valuation_table_for_display,
     prepare_rolling_metrics_chart_data,
+    refresh_dashboard_market_data,
     resolve_dashboard_db_path,
     select_calendar_axis_tick_dates,
     select_observation_axis_labels,
@@ -47,16 +52,20 @@ from sma_dashboard.dashboard_support import (
     validate_dashboard_database,
     latest_rolling_metrics,
 )
-from sma_dashboard.db import PROJECT_ROOT, init_db
+from sma_dashboard.db import DEFAULT_DB_PATH, PROJECT_ROOT, init_db
 from sma_dashboard.performance import BENCHMARK_TICKER, calculate_rolling_metrics
 
 
 TEST_DB = Path("data/db/test_dashboard_support.sqlite")
+TEST_MANIFEST = Path("data/raw/test_dashboard_support_manifest.csv")
+TEST_MODEL_FILE = Path("data/raw/test_dashboard_support_model.xlsx")
 
 
 class DashboardSupportTests(unittest.TestCase):
     def tearDown(self) -> None:
         TEST_DB.unlink(missing_ok=True)
+        TEST_MANIFEST.unlink(missing_ok=True)
+        TEST_MODEL_FILE.unlink(missing_ok=True)
 
     def test_trade_log_query_filters_and_sorts_most_recent_first(self) -> None:
         init_db(TEST_DB)
@@ -72,6 +81,7 @@ class DashboardSupportTests(unittest.TestCase):
     def test_dashboard_default_db_path_resolves_to_project_db_file(self) -> None:
         self.assertEqual(resolve_dashboard_db_path(), DASHBOARD_DEFAULT_DB_PATH)
         self.assertEqual(DASHBOARD_DEFAULT_DB_PATH, PROJECT_ROOT / "data" / "db" / "sma_dashboard.db")
+        self.assertEqual(DEFAULT_DB_PATH, DASHBOARD_DEFAULT_DB_PATH)
 
     def test_relative_db_path_resolves_against_project_root(self) -> None:
         path = resolve_dashboard_db_path("data/db/custom.sqlite")
@@ -168,6 +178,94 @@ class DashboardSupportTests(unittest.TestCase):
         self.assertIn("--db data/db/sma_dashboard.db", BENCHMARK_REFRESH_COMMAND)
         self.assertIn("--benchmark ^GSPTSE", BENCHMARK_REFRESH_COMMAND)
         self.assertIn("--start-date 2025-02-01", BENCHMARK_REFRESH_COMMAND)
+
+    def test_dashboard_freshness_reports_latest_dates(self) -> None:
+        init_db(TEST_DB)
+        _insert_holding("2025-02-03", "RY.TO", 100.0)
+        _insert_price("2025-02-04", "RY.TO", 101.0)
+        _insert_price("2025-02-05", BENCHMARK_TICKER, 100.0)
+
+        freshness = get_dashboard_freshness(TEST_DB)
+
+        self.assertEqual(freshness.latest_model_update_date, "2025-02-03")
+        self.assertEqual(freshness.latest_current_holding_price_date, "2025-02-04")
+        self.assertEqual(freshness.latest_benchmark_price_date, "2025-02-05")
+        self.assertEqual(freshness.current_holding_price_status, "complete")
+        self.assertEqual(freshness.missing_current_holding_price_tickers, ())
+
+    def test_dashboard_freshness_reports_missing_current_holding_prices(self) -> None:
+        init_db(TEST_DB)
+        _insert_holding("2025-02-03", "AAPL", 40.0)
+        _insert_holding("2025-02-03", "RY.TO", 60.0)
+        _insert_price("2025-02-04", "RY.TO", 101.0)
+
+        freshness = get_dashboard_freshness(TEST_DB)
+
+        self.assertIsNone(freshness.latest_current_holding_price_date)
+        self.assertEqual(freshness.current_holding_price_status, "missing_prices")
+        self.assertEqual(freshness.missing_current_holding_price_tickers, ("AAPL",))
+
+    def test_refresh_dashboard_market_data_refreshes_each_current_holding_and_benchmark(self) -> None:
+        init_db(TEST_DB)
+        _insert_seeded_return("2025-01-31", 0.0)
+        _insert_holding("2025-02-03", "AAPL", 40.0)
+        _insert_holding("2025-02-03", "RY.TO", 60.0)
+        _insert_holding("2025-02-03", "CASH.TO", 0.0)
+        _insert_price("2025-02-04", "AAPL", 100.0)
+        _insert_price("2025-02-05", "RY.TO", 100.0)
+        _insert_price("2025-02-06", BENCHMARK_TICKER, 100.0)
+
+        with (
+            patch("sma_dashboard.ingestion.refresh_market_data", side_effect=[(2, 2), (3, 0)]) as refresh_market,
+            patch("sma_dashboard.performance.refresh_benchmark_prices_with_summary") as refresh_benchmark,
+        ):
+            refresh_benchmark.return_value = SimpleNamespace(rows_written=4)
+            summary = refresh_dashboard_market_data(TEST_DB)
+
+        self.assertEqual([call.args[0] for call in refresh_market.call_args_list], [["AAPL"], ["RY.TO"]])
+        refresh_benchmark.assert_called_once()
+        self.assertEqual(refresh_benchmark.call_args.kwargs["start_date"], "2025-02-07")
+        self.assertEqual(summary.holding_price_rows_written, 5)
+        self.assertEqual(summary.fx_rows_written, 2)
+        self.assertEqual(summary.benchmark_rows_written, 4)
+        self.assertEqual(summary.holding_tickers, ("AAPL", "RY.TO"))
+        self.assertEqual(summary.missing_holding_price_tickers_after, ())
+        self.assertEqual(summary.failed_tickers, ())
+
+    def test_refresh_dashboard_market_data_preserves_partial_failures_as_warnings(self) -> None:
+        init_db(TEST_DB)
+        _insert_seeded_return("2025-01-31", 0.0)
+        _insert_holding("2025-02-03", "AAPL", 50.0)
+        _insert_holding("2025-02-03", "RY.TO", 50.0)
+        _insert_price("2025-02-04", "RY.TO", 100.0)
+
+        with (
+            patch("sma_dashboard.ingestion.refresh_market_data", side_effect=[RuntimeError("rate limit"), (1, 0)]),
+            patch("sma_dashboard.performance.refresh_benchmark_prices_with_summary") as refresh_benchmark,
+        ):
+            refresh_benchmark.return_value = SimpleNamespace(rows_written=0)
+            summary = refresh_dashboard_market_data(TEST_DB)
+
+        self.assertEqual(summary.holding_price_rows_written, 1)
+        self.assertTrue(any("AAPL" in warning and "rate limit" in warning for warning in summary.warnings))
+        self.assertEqual(summary.missing_holding_price_tickers_after, ("AAPL",))
+        self.assertEqual(summary.failed_tickers, ("AAPL",))
+
+    def test_pending_model_update_notice_detects_manifest_newer_than_holdings(self) -> None:
+        init_db(TEST_DB)
+        _insert_holding("2025-02-03", "RY.TO", 100.0)
+        TEST_MODEL_FILE.write_text("", encoding="utf-8")
+        TEST_MANIFEST.write_text(
+            "file,model_date,notes\n"
+            "data/raw/test_dashboard_support_model.xlsx,2025-02-10,test\n",
+            encoding="utf-8",
+        )
+
+        notice = pending_model_update_notice(TEST_DB, TEST_MANIFEST)
+
+        self.assertIsNotNone(notice)
+        self.assertIn("2025-02-10", notice)
+        self.assertIn("2025-02-03", notice)
 
     def test_formatting_helpers(self) -> None:
         self.assertEqual(format_percent(0.1234), "12.34%")
@@ -640,6 +738,60 @@ class DashboardSupportTests(unittest.TestCase):
 
         self.assertEqual(display.loc[0, "Dividend Yield"], "0.92%")
 
+    def test_interactive_valuation_table_formats_market_cap_and_preserves_other_numeric_dtypes(self) -> None:
+        valuation = pd.DataFrame(
+            [
+                {
+                    "ticker": "AAA.TO",
+                    "weight": 4.25,
+                    "pe_trailing": 18.4,
+                    "pe_forward": None,
+                    "pb": 2.5,
+                    "ev_ebitda": 10.0,
+                    "dividend_yield": 0.035,
+                    "market_cap": 2_400_000_000,
+                }
+            ]
+        )
+
+        display = prepare_valuation_table_for_display(valuation)
+
+        for column in (
+            "Weight",
+            "Trailing P/E",
+            "Forward P/E",
+            "Price / Book",
+            "EV / EBITDA",
+            "Dividend Yield",
+        ):
+            self.assertTrue(pd.api.types.is_numeric_dtype(display[column]), column)
+        self.assertEqual(display.loc[0, "Ticker"], "AAA.TO")
+        self.assertEqual(display.loc[0, "Market Cap (CAD)"], "C$2,400,000,000")
+        self.assertFalse(pd.api.types.is_numeric_dtype(display["Market Cap (CAD)"]))
+
+    def test_interactive_valuation_table_sorts_ratios_and_formats_market_cap(self) -> None:
+        valuation = pd.DataFrame(
+            [
+                {"ticker": "HIGH.TO", "pe_trailing": 100.0, "market_cap": 850_000_000},
+                {"ticker": "LOW.TO", "pe_trailing": 9.5, "market_cap": 2_400_000_000},
+                {"ticker": "MID.TO", "pe_trailing": 18.4, "market_cap": 12_500_000},
+            ]
+        )
+
+        display = prepare_valuation_table_for_display(valuation)
+
+        pe_order = display.sort_values("Trailing P/E")["Ticker"].tolist()
+
+        self.assertEqual(pe_order, ["LOW.TO", "MID.TO", "HIGH.TO"])
+        self.assertEqual(
+            display.set_index("Ticker")["Market Cap (CAD)"].to_dict(),
+            {
+                "HIGH.TO": "C$850,000,000",
+                "LOW.TO": "C$2,400,000,000",
+                "MID.TO": "C$12,500,000",
+            },
+        )
+
     def test_weighted_dividend_yield_formats_as_percentage(self) -> None:
         display = format_weighted_valuation_averages(
             {
@@ -976,6 +1128,36 @@ def _insert_trade(trade_date: str, ticker: str, action: str, weight_change: floa
             VALUES (?, ?, ?, ?, NULL)
             """,
             (trade_date, ticker, action, weight_change),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _insert_seeded_return(seed_date: str, return_pct: float) -> None:
+    conn = sqlite3.connect(TEST_DB)
+    try:
+        conn.execute(
+            """
+            INSERT INTO seeded_returns (date, return_pct, source, notes)
+            VALUES (?, ?, 'manager reported', NULL)
+            """,
+            (seed_date, return_pct),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _insert_holding(snapshot_date: str, ticker: str, weight: float) -> None:
+    conn = sqlite3.connect(TEST_DB)
+    try:
+        conn.execute(
+            """
+            INSERT INTO holdings (date, ticker, weight, shares, cost_basis)
+            VALUES (?, ?, ?, NULL, NULL)
+            """,
+            (snapshot_date, ticker, weight),
         )
         conn.commit()
     finally:

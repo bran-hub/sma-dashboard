@@ -10,12 +10,15 @@ import pandas as pd
 
 from sma_dashboard.db import init_db
 from sma_dashboard.ingestion import (
+    MarketDataRefreshError,
     _parse_row,
     ingest_model_update,
     is_usd_listed,
     normalize_ticker,
     refresh_market_data,
+    ticker_currency,
 )
+from sma_dashboard.holdings import HoldingsDataError
 
 
 MAPPING = {
@@ -62,7 +65,7 @@ class IngestionParsingTests(unittest.TestCase):
 
         holding, trade = _parse_row(row, MAPPING, None)
 
-        self.assertEqual(holding, ("2025-02-03", "SHOP.TO", 4.5, 10.0, 1200.0))
+        self.assertEqual(holding, ("2025-02-03", "SHOP.TO", 4.5, "CAD", 10.0, 1200.0))
         self.assertEqual(trade, ("2025-02-03", "SHOP.TO", "add", 1.25, "Manager added."))
 
     def test_parse_rejects_action_sign_mismatch(self) -> None:
@@ -92,6 +95,48 @@ class IngestionParsingTests(unittest.TestCase):
         self.assertTrue(is_usd_listed("AAPL"))
         self.assertFalse(is_usd_listed("SHOP.TO"))
         self.assertFalse(is_usd_listed("ABC.V"))
+        self.assertFalse(is_usd_listed("ABC.NE"))
+        self.assertFalse(is_usd_listed("ABC.CN"))
+        with self.assertRaisesRegex(ValueError, "Currency is ambiguous"):
+            ticker_currency("VOD.L")
+        self.assertEqual(ticker_currency("VOD.L", {"VOD.L": "USD"}), "USD")
+
+    def test_duplicate_ingestion_rejected_and_replace_is_idempotent(self) -> None:
+        frame = pd.DataFrame([{"Date": "2025-02-03", "Ticker": "RY.TO", "Weight": 5.0, "Action": "buy", "Weight Change": 5.0}])
+        with (
+            patch("sma_dashboard.ingestion.pd.read_excel", return_value=frame),
+            patch("sma_dashboard.ingestion.load_column_mapping", return_value=MAPPING),
+        ):
+            ingest_model_update(TEST_XLSX, db_path=TEST_DB, skip_market_data=True)
+            with self.assertRaisesRegex(HoldingsDataError, "already been applied"):
+                ingest_model_update(TEST_XLSX, db_path=TEST_DB, skip_market_data=True)
+            ingest_model_update(TEST_XLSX, db_path=TEST_DB, skip_market_data=True, replace_date=True)
+
+        conn = sqlite3.connect(TEST_DB)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM holdings").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM model_updates_applied").fetchone()[0], 1)
+        finally:
+            conn.close()
+
+    def test_market_data_failure_leaves_no_partial_model_update(self) -> None:
+        frame = pd.DataFrame([{"Date": "2025-02-03", "Ticker": "RY.TO", "Weight": 100.0}])
+        with (
+            patch("sma_dashboard.ingestion.pd.read_excel", return_value=frame),
+            patch("sma_dashboard.ingestion.load_column_mapping", return_value=MAPPING),
+            patch("sma_dashboard.ingestion._collect_market_data", side_effect=RuntimeError("network down")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "network down"):
+                ingest_model_update(TEST_XLSX, db_path=TEST_DB)
+
+        conn = sqlite3.connect(TEST_DB)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM holdings").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM model_updates_applied").fetchone()[0], 0)
+        finally:
+            conn.close()
 
     def test_ingest_writes_malformed_rows_to_rejected_rows(self) -> None:
         frame = pd.DataFrame(
@@ -220,6 +265,42 @@ class IngestionParsingTests(unittest.TestCase):
         self.assertEqual(captured["start"], "2025-01-31")
         self.assertEqual(captured["end"], "2025-02-04")
 
+    def test_empty_price_download_fails_clearly_after_retry(self) -> None:
+        init_db(TEST_DB)
+
+        with (
+            patch("sma_dashboard.ingestion._download_price_frame", return_value=pd.DataFrame()) as download,
+            patch("sma_dashboard.ingestion._tomorrow_iso", return_value="2025-02-04"),
+        ):
+            with self.assertRaisesRegex(MarketDataRefreshError, "BAD.TO"):
+                refresh_market_data(
+                    ["BAD.TO"],
+                    db_path=TEST_DB,
+                    fallback_start_date="2025-02-03",
+                )
+
+        self.assertEqual(download.call_count, 2)
+
+    def test_empty_then_successful_price_download_retry_stores_prices(self) -> None:
+        init_db(TEST_DB)
+        price_frame = pd.DataFrame(
+            {"Close": [100.0], "Adj Close": [100.0]},
+            index=pd.to_datetime(["2025-02-03"]),
+        )
+
+        with (
+            patch("sma_dashboard.ingestion._download_price_frame", side_effect=[pd.DataFrame(), price_frame]),
+            patch("sma_dashboard.ingestion._tomorrow_iso", return_value="2025-02-04"),
+        ):
+            prices_written, fx_written = refresh_market_data(
+                ["RY.TO"],
+                db_path=TEST_DB,
+                fallback_start_date="2025-02-03",
+            )
+
+        self.assertEqual(prices_written, 1)
+        self.assertEqual(fx_written, 0)
+
     def test_model_update_date_provided_by_model_date(self) -> None:
         _write_manager_mapping()
         raw = _manager_raw_frame([["Royal Bank", "RY CN", "CUSIP1", "5.0%", "4.0%", "1.0%", "BUY"]])
@@ -238,7 +319,7 @@ class IngestionParsingTests(unittest.TestCase):
 
     def test_model_update_date_derived_from_filename(self) -> None:
         _write_manager_mapping()
-        dated_file = Path("data/raw/manager_model_update_2024-12-19.xlsx")
+        dated_file = Path("data/raw/Manager - Model_Changes_2024-12-19.xlsx")
         raw = _manager_raw_frame([["Royal Bank", "RY CN", "CUSIP1", "5.0%", "4.0%", "1.0%", "BUY"]])
 
         with patch("sma_dashboard.ingestion.pd.read_excel", return_value=raw):
@@ -406,14 +487,15 @@ class IngestionParsingTests(unittest.TestCase):
         )
         captured: dict[str, list[str]] = {}
 
-        def fake_refresh(tickers: list[str], db_path: Path, update_date: str) -> tuple[int, int]:
+        def fake_collect(tickers: list[str], db_path: Path, update_date: str, currencies: dict[str, str]):
             captured["tickers"] = tickers
             captured["date"] = [update_date]
-            return (0, 0)
+            from sma_dashboard.ingestion import MarketDataRows
+            return MarketDataRows([], [])
 
         with (
             patch("sma_dashboard.ingestion.pd.read_excel", return_value=raw),
-            patch("sma_dashboard.ingestion.refresh_market_data", side_effect=fake_refresh),
+            patch("sma_dashboard.ingestion._collect_market_data", side_effect=fake_collect),
         ):
             result = ingest_model_update(
                 TEST_XLSX,

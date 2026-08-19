@@ -13,11 +13,13 @@ from typing import Any
 import pandas as pd
 
 from sma_dashboard.db import DEFAULT_DB_PATH, PROJECT_ROOT, connect, init_db
+from sma_dashboard.holdings import HoldingsDataError
 
 
 DEFAULT_MAPPING_PATH = PROJECT_ROOT / "config" / "column_mapping.json"
 FX_PAIR = "CADUSD=X"
-CAD_SUFFIXES = (".TO", ".V")
+CAD_SUFFIXES = (".TO", ".V", ".NE", ".CN")
+SUPPORTED_CURRENCIES = {"CAD", "USD"}
 TRADE_ACTIONS = {"buy", "sell", "trim", "add"}
 POSITIVE_ACTIONS = {"buy", "add"}
 NEGATIVE_ACTIONS = {"sell", "trim"}
@@ -31,6 +33,17 @@ class IngestionResult:
     skipped_cash_rows: int
     prices_written: int
     fx_rates_written: int
+    model_date: str | None = None
+
+
+@dataclass(frozen=True)
+class MarketDataRows:
+    prices: list[tuple[str, str, float, float]]
+    fx_rates: list[tuple[str, str, float]]
+
+
+class MarketDataRefreshError(RuntimeError):
+    """Raised when required market data could not be fetched for a holding."""
 
 
 def load_column_mapping(path: Path | str = DEFAULT_MAPPING_PATH) -> dict[str, Any]:
@@ -56,13 +69,33 @@ def load_ticker_overrides(path: Path | str | None = None) -> dict[str, str]:
         return {str(key).strip().upper(): str(value).strip().upper() for key, value in json.load(handle).items()}
 
 
+def load_ticker_currency_overrides(path: Path | str | None = None) -> dict[str, str]:
+    if path is None:
+        return {}
+    override_path = Path(path)
+    if not override_path.exists():
+        return {}
+    with override_path.open("r", encoding="utf-8") as handle:
+        raw = json.load(handle)
+    overrides = {str(key).strip().upper(): str(value).strip().upper() for key, value in raw.items()}
+    unsupported = {ticker: currency for ticker, currency in overrides.items() if currency not in SUPPORTED_CURRENCIES}
+    if unsupported:
+        raise ValueError(f"Unsupported ticker currency overrides: {unsupported}. Use CAD or USD.")
+    return overrides
+
+
 def ingest_model_update(
     excel_path: Path | str,
     model_date: str | date | None = None,
     db_path: Path | str = DEFAULT_DB_PATH,
     mapping_path: Path | str = DEFAULT_MAPPING_PATH,
     ticker_overrides_path: Path | str | None = None,
+    ticker_currency_overrides_path: Path | str | None = None,
     skip_market_data: bool = False,
+    replace_date: bool = False,
+    source: str = "real data",
+    ingested_by: str | None = None,
+    notes: str | None = None,
 ) -> IngestionResult:
     """Parse one manager model update and persist M1 data.
 
@@ -72,10 +105,11 @@ def ingest_model_update(
     db_file = init_db(db_path)
     mapping = load_column_mapping(mapping_path)
     ticker_overrides = load_ticker_overrides(ticker_overrides_path)
+    currency_overrides = load_ticker_currency_overrides(ticker_currency_overrides_path)
     frame = _read_model_update_excel(excel_path, mapping)
     resolved_model_date = _resolve_model_date(excel_path, model_date, mapping, frame)
 
-    holdings: list[tuple[str, str, float, float | None, float | None]] = []
+    holdings: list[tuple[str, str, float, str, float | None, float | None]] = []
     trades: list[tuple[str, str, str, float, str | None]] = []
     rejected: list[tuple[str, str, str, str]] = []
     skipped_cash_rows = 0
@@ -88,7 +122,13 @@ def ingest_model_update(
             skipped_cash_rows += 1
             continue
         try:
-            holding, trade = _parse_row(row, mapping, resolved_model_date, ticker_overrides)
+            holding, trade = _parse_row(
+                row,
+                mapping,
+                resolved_model_date,
+                ticker_overrides,
+                currency_overrides,
+            )
             holdings.append(holding)
             if trade is not None:
                 trades.append(trade)
@@ -102,44 +142,109 @@ def ingest_model_update(
                 )
             )
 
-    with closing(connect(db_file)) as conn:
-        with conn:
-            conn.executemany(
-                """
-                INSERT OR REPLACE INTO holdings (date, ticker, weight, shares, cost_basis)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                holdings,
+    model_dates = sorted({holding[0] for holding in holdings})
+    applied_model_date = resolved_model_date
+    if applied_model_date is None:
+        if not holdings:
+            with closing(connect(db_file)) as conn:
+                with conn:
+                    conn.executemany(
+                        """
+                        INSERT INTO rejected_rows (date_attempted, source_file, raw_row_data, reason)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        rejected,
+                    )
+            return IngestionResult(
+                holdings_written=0,
+                trades_written=0,
+                rejected_rows=len(rejected),
+                skipped_cash_rows=skipped_cash_rows,
+                prices_written=0,
+                fx_rates_written=0,
+                model_date=None,
             )
-            conn.executemany(
-                """
-                INSERT INTO trades (date, ticker, action, weight_change, notes)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                trades,
-            )
-            conn.executemany(
-                """
-                INSERT INTO rejected_rows (date_attempted, source_file, raw_row_data, reason)
-                VALUES (?, ?, ?, ?)
-                """,
-                rejected,
-            )
+        if len(model_dates) != 1:
+            raise ValueError("A model update must resolve to exactly one model date.")
+        applied_model_date = model_dates[0]
 
-    prices_written = 0
-    fx_rates_written = 0
+    market_rows = MarketDataRows([], [])
     if holdings and not skip_market_data:
         tickers = sorted({holding[1] for holding in holdings})
         update_date = min(holding[0] for holding in holdings)
-        prices_written, fx_rates_written = refresh_market_data(tickers, db_file, update_date)
+        currencies = {holding[1]: holding[3] for holding in holdings}
+        market_rows = _collect_market_data(tickers, db_file, update_date, currencies)
+
+    with closing(connect(db_file)) as conn:
+        try:
+            with conn:
+                if replace_date:
+                    _delete_existing_model_update(conn, applied_model_date)
+                elif conn.execute(
+                    "SELECT 1 FROM model_updates_applied WHERE model_date = ? LIMIT 1",
+                    (applied_model_date,),
+                ).fetchone() is not None:
+                    raise HoldingsDataError(
+                        f"Model date {applied_model_date} has already been applied. Use --replace-date to override."
+                    )
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO holdings (date, ticker, weight, currency, shares, cost_basis)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    holdings,
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO trades (date, ticker, action, weight_change, notes)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    trades,
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO rejected_rows (date_attempted, source_file, raw_row_data, reason)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    rejected,
+                )
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO prices (date, ticker, close, adj_close)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    market_rows.prices,
+                )
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO fx_rates (date, pair, rate)
+                    VALUES (?, ?, ?)
+                    """,
+                    market_rows.fx_rates,
+                )
+                conn.execute(
+                    """
+                    INSERT INTO model_updates_applied
+                        (model_date, file_name, source, ingested_by, notes)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (applied_model_date, Path(excel_path).name, source, ingested_by, notes),
+                )
+        except sqlite3.IntegrityError as exc:
+            if "model_updates_applied.model_date" in str(exc):
+                raise HoldingsDataError(
+                    f"Model date {applied_model_date} has already been applied. Use --replace-date to override."
+                ) from exc
+            raise
 
     return IngestionResult(
         holdings_written=len(holdings),
         trades_written=len(trades),
         rejected_rows=len(rejected),
         skipped_cash_rows=skipped_cash_rows,
-        prices_written=prices_written,
-        fx_rates_written=fx_rates_written,
+        prices_written=len(market_rows.prices),
+        fx_rates_written=len(market_rows.fx_rates),
+        model_date=applied_model_date,
     )
 
 
@@ -207,49 +312,84 @@ def refresh_market_data(
 ) -> tuple[int, int]:
     """Fetch prices for current tickers and FX rates required for USD listings."""
     init_db(db_path)
-    fallback = _to_iso_date(fallback_start_date) if fallback_start_date else date.today().isoformat()
-    since_inception = _get_since_inception_date(db_path) or fallback
-    price_rows: list[tuple[str, str, float, float]] = []
-    fx_rows: list[tuple[str, str, float]] = []
-
+    rows = _collect_market_data(tickers, db_path, fallback_start_date)
     with closing(connect(db_path)) as conn:
         with conn:
-            existing = _existing_tickers(conn)
-            for ticker in tickers:
-                start = since_inception if ticker not in existing else _next_price_start(conn, ticker, fallback)
-                end = _tomorrow_iso()
-                if start >= end:
-                    continue
-                prices = _download_price_frame(ticker, start, end)
-                if prices.empty:
-                    continue
-                if is_usd_listed(ticker):
-                    fx = _download_fx_frame(start, end)
-                    if fx.empty:
-                        raise RuntimeError(f"Missing FX data for {FX_PAIR} from {start} to {end}.")
-                    fx_rows.extend(_fx_rows_from_frame(fx))
-                price_rows.extend(_price_rows_from_frame(ticker, prices))
-
             conn.executemany(
                 """
                 INSERT OR REPLACE INTO prices (date, ticker, close, adj_close)
                 VALUES (?, ?, ?, ?)
                 """,
-                price_rows,
+                rows.prices,
             )
             conn.executemany(
                 """
                 INSERT OR REPLACE INTO fx_rates (date, pair, rate)
                 VALUES (?, ?, ?)
                 """,
-                sorted(set(fx_rows)),
+                rows.fx_rates,
             )
+    return len(rows.prices), len(rows.fx_rates)
 
-    return len(price_rows), len(set(fx_rows))
+
+def _collect_market_data(
+    tickers: list[str],
+    db_path: Path | str,
+    fallback_start_date: str | date | None = None,
+    currencies: dict[str, str] | None = None,
+) -> MarketDataRows:
+    fallback = _to_iso_date(fallback_start_date) if fallback_start_date else date.today().isoformat()
+    since_inception = _get_since_inception_date(db_path) or fallback
+    price_rows: list[tuple[str, str, float, float]] = []
+    fx_rows: list[tuple[str, str, float]] = []
+
+    with closing(connect(db_path)) as conn:
+        existing = _existing_tickers(conn)
+        for ticker in tickers:
+            start = since_inception if ticker not in existing else _next_price_start(conn, ticker, fallback)
+            end = _tomorrow_iso()
+            if start >= end:
+                continue
+            prices = _download_price_frame_with_retry(ticker, start, end)
+            if prices.empty:
+                raise MarketDataRefreshError(
+                    f"No price data returned for {ticker} from {start} to {end}. "
+                    "Check the yfinance ticker or add a local ticker override."
+                )
+            currency = (currencies or {}).get(ticker)
+            if currency is None:
+                currency = ticker_currency(ticker)
+            if currency == "USD":
+                fx = _download_fx_frame(start, end)
+                if fx.empty:
+                    raise MarketDataRefreshError(f"Missing FX data for {FX_PAIR} from {start} to {end}.")
+                fx_rows.extend(_fx_rows_from_frame(fx))
+            ticker_price_rows = _price_rows_from_frame(ticker, prices)
+            if not ticker_price_rows:
+                raise MarketDataRefreshError(
+                    f"No usable price rows returned for {ticker} from {start} to {end}. "
+                    "Check the yfinance ticker or add a local ticker override."
+                )
+            price_rows.extend(ticker_price_rows)
+
+    return MarketDataRows(price_rows, sorted(set(fx_rows)))
 
 
-def is_usd_listed(ticker: str) -> bool:
-    return not ticker.upper().endswith(CAD_SUFFIXES)
+def ticker_currency(ticker: str, overrides: dict[str, str] | None = None) -> str:
+    normalized = ticker.strip().upper()
+    if normalized in (overrides or {}):
+        return (overrides or {})[normalized]
+    if normalized.endswith(CAD_SUFFIXES):
+        return "CAD"
+    if "." in normalized:
+        raise ValueError(
+            f"Currency is ambiguous for ticker {ticker}. Add it to the ticker currency override file."
+        )
+    return "USD"
+
+
+def is_usd_listed(ticker: str, overrides: dict[str, str] | None = None) -> bool:
+    return ticker_currency(ticker, overrides) == "USD"
 
 
 def _parse_row(
@@ -257,18 +397,20 @@ def _parse_row(
     mapping: dict[str, Any],
     model_date: str | date | None,
     ticker_overrides: dict[str, str] | None = None,
-) -> tuple[tuple[str, str, float, float | None, float | None], tuple[str, str, str, float, str | None] | None]:
+    currency_overrides: dict[str, str] | None = None,
+) -> tuple[tuple[str, str, float, str, float | None, float | None], tuple[str, str, str, float, str | None] | None]:
     columns = mapping["columns"]
     row_date = _optional_cell(row, columns.get("date"))
     parsed_date = _to_iso_date(row_date if row_date is not None else model_date)
     ticker_source = columns.get("raw_ticker") or columns.get("ticker")
     ticker = normalize_ticker(_required_cell(row, ticker_source, "ticker"), ticker_overrides or {})
+    currency = ticker_currency(ticker, currency_overrides)
     weight = _parse_number(_required_cell(row, columns["weight"], "weight"), "weight")
     weight = _normalize_percent(weight, mapping.get("weight_input", "percent"), "weight")
     shares = _parse_optional_number(_optional_cell(row, columns.get("shares")), "shares")
     cost_basis = _parse_optional_number(_optional_cell(row, columns.get("cost_basis")), "cost_basis")
 
-    holding = (parsed_date, ticker, weight, shares, cost_basis)
+    holding = (parsed_date, ticker, weight, currency, shares, cost_basis)
     action_cell = _optional_cell(row, columns.get("action"))
     change_cell = _optional_cell(row, columns.get("weight_change"))
     notes = _parse_optional_text(_optional_cell(row, columns.get("notes")))
@@ -430,6 +572,16 @@ def _get_since_inception_date(db_path: Path | str) -> str | None:
     return value
 
 
+def _delete_existing_model_update(conn: sqlite3.Connection, model_date: str) -> None:
+    """Delete one model date inside the caller's replacement transaction."""
+    conn.execute("DELETE FROM trades WHERE date = ?", (model_date,))
+    conn.execute("DELETE FROM holdings WHERE date = ?", (model_date,))
+    conn.execute(
+        "DELETE FROM model_updates_applied WHERE model_date = ?",
+        (model_date,),
+    )
+
+
 def _existing_tickers(conn: sqlite3.Connection) -> set[str]:
     return {row[0] for row in conn.execute("SELECT DISTINCT ticker FROM prices")}
 
@@ -450,6 +602,13 @@ def _download_price_frame(ticker: str, start: str, end: str) -> pd.DataFrame:
 
     frame = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=False)
     return _flatten_yfinance_frame(frame)
+
+
+def _download_price_frame_with_retry(ticker: str, start: str, end: str) -> pd.DataFrame:
+    frame = _download_price_frame(ticker, start, end)
+    if not frame.empty:
+        return frame
+    return _download_price_frame(ticker, start, end)
 
 
 def _download_fx_frame(start: str, end: str) -> pd.DataFrame:
@@ -508,6 +667,14 @@ def main() -> None:
     parser.add_argument("--db", "--db-path", dest="db_path", type=Path, default=DEFAULT_DB_PATH)
     parser.add_argument("--config", "--mapping-path", dest="mapping_path", type=Path, default=DEFAULT_MAPPING_PATH)
     parser.add_argument("--ticker-overrides", type=Path)
+    parser.add_argument("--ticker-currency-overrides", type=Path)
+    parser.add_argument("--notes")
+    parser.add_argument("--ingested-by")
+    parser.add_argument(
+        "--replace-date",
+        action="store_true",
+        help="Delete existing holdings, trades, and audit status for the model date before ingestion.",
+    )
     parser.add_argument(
         "--skip-market-data",
         action="store_true",
@@ -523,7 +690,12 @@ def main() -> None:
         db_path=args.db_path,
         mapping_path=args.mapping_path,
         ticker_overrides_path=args.ticker_overrides,
+        ticker_currency_overrides_path=args.ticker_currency_overrides,
         skip_market_data=args.skip_market_data,
+        replace_date=args.replace_date,
+        source="real data",
+        ingested_by=args.ingested_by,
+        notes=args.notes,
     )
     print(result)
 

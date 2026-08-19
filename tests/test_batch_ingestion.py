@@ -8,6 +8,11 @@ from unittest.mock import patch
 
 from sma_dashboard.batch_ingestion import ingest_manifest, load_manifest
 from sma_dashboard.db import init_db
+from sma_dashboard.holdings import (
+    HoldingsDataError,
+    get_model_updates_applied,
+    log_model_update_applied,
+)
 from sma_dashboard.ingestion import IngestionResult
 
 
@@ -97,6 +102,13 @@ class BatchIngestionTests(unittest.TestCase):
 
         def fake_ingest(excel_path: Path, **kwargs: object) -> IngestionResult:
             calls.append((Path(excel_path), str(kwargs["model_date"])))
+            log_model_update_applied(
+                TEST_DB,
+                str(kwargs["model_date"]),
+                file_name=Path(excel_path).name,
+                source=str(kwargs["source"]),
+                notes=kwargs["notes"],
+            )
             return IngestionResult(1, 1, 0, 0, 0, 0)
 
         with patch("sma_dashboard.batch_ingestion.ingest_model_update", side_effect=fake_ingest):
@@ -106,6 +118,25 @@ class BatchIngestionTests(unittest.TestCase):
         self.assertEqual(result.files_processed, 2)
         self.assertEqual(result.holdings_written, 2)
         self.assertEqual(result.trades_written, 2)
+        applied = get_model_updates_applied(TEST_DB)
+        self.assertEqual(applied["model_date"].tolist(), ["2025-03-01", "2025-02-01"])
+        self.assertEqual(applied["source"].tolist(), ["real data", "real data"])
+        self.assertEqual(applied["notes"].tolist(), [None, None])
+
+    def test_applied_model_date_fails_before_ingestion(self) -> None:
+        init_db(TEST_DB)
+        log_model_update_applied(TEST_DB, "2025-02-01", file_name="previous.xlsx")
+        _touch_files()
+        _write_manifest(["file,model_date", f"{TEST_FILE_A.as_posix()},2025-02-01"])
+
+        with patch("sma_dashboard.batch_ingestion.ingest_model_update") as ingest:
+            with self.assertRaisesRegex(
+                HoldingsDataError,
+                "already been applied.*--replace-date",
+            ):
+                ingest_manifest(TEST_MANIFEST, db_path=TEST_DB)
+
+        ingest.assert_not_called()
 
     def test_skip_market_data_is_passed_through(self) -> None:
         _touch_files()
@@ -127,15 +158,13 @@ class BatchIngestionTests(unittest.TestCase):
         _touch_files()
         _write_manifest(["file,model_date", f"{TEST_FILE_A.as_posix()},2025-02-01"])
 
-        def fake_ingest(excel_path: Path, **kwargs: object) -> IngestionResult:
-            _insert_new_model_update(str(kwargs["model_date"]))
-            return IngestionResult(1, 1, 0, 0, 0, 0)
-
-        with patch("sma_dashboard.batch_ingestion.ingest_model_update", side_effect=fake_ingest):
+        with patch(
+            "sma_dashboard.batch_ingestion.ingest_model_update",
+            return_value=IngestionResult(1, 1, 0, 0, 0, 0),
+        ) as ingest:
             ingest_manifest(TEST_MANIFEST, db_path=TEST_DB, replace_date=True)
 
-        self.assertEqual(_count_rows("holdings"), 1)
-        self.assertEqual(_count_rows("trades"), 1)
+        self.assertTrue(ingest.call_args.kwargs["replace_date"])
 
 
 def _write_manifest(lines: list[str]) -> None:
@@ -158,6 +187,10 @@ def _insert_existing_model_update(model_date: str) -> None:
             )
             conn.execute(
                 "INSERT INTO trades (date, ticker, action, weight_change, notes) VALUES (?, 'OLD.TO', 'buy', 1.0, NULL)",
+                (model_date,),
+            )
+            conn.execute(
+                "INSERT INTO model_updates_applied (model_date, file_name) VALUES (?, 'old.xlsx')",
                 (model_date,),
             )
 

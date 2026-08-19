@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import altair as alt
@@ -29,14 +30,17 @@ from sma_dashboard.dashboard_support import (
     format_ratio,
     format_risk_metrics_table,
     format_trade_log_table,
-    format_valuation_table,
     format_weighted_valuation_averages,
     get_calculated_benchmark_price_coverage,
+    get_dashboard_freshness,
     list_trade_filter_values,
     load_trade_log,
     normalize_starting_capital,
+    pending_model_update_notice,
     performance_range_note,
+    prepare_valuation_table_for_display,
     prepare_rolling_metrics_chart_data,
+    refresh_dashboard_market_data,
     resolve_dashboard_db_path,
     select_calendar_axis_tick_dates,
     select_observation_axis_labels,
@@ -45,7 +49,11 @@ from sma_dashboard.dashboard_support import (
     validate_dashboard_database,
     latest_rolling_metrics,
 )
-from sma_dashboard.holdings import HoldingsDataError, get_latest_holdings_snapshot
+from sma_dashboard.holdings import (
+    HoldingsDataError,
+    get_latest_holdings_snapshot,
+    get_model_updates_applied,
+)
 from sma_dashboard.news import get_holding_news
 from sma_dashboard.performance import (
     BENCHMARK_TICKER,
@@ -69,20 +77,23 @@ def run_app() -> None:
 
     controls = _sidebar_controls()
     db_path = controls["db_path"]
-    if controls["refresh"]:
-        st.cache_data.clear()
+    demo_mode = os.environ.get("SMA_DEMO_MODE", "0") == "1"
 
     validation = validate_dashboard_database(db_path)
     if not validation.is_valid:
         _render_database_setup_warning(validation)
         return
 
+    _render_market_data_refresh(db_path, controls)
     _render_data_overview(db_path)
     _render_performance(db_path, controls)
     _render_rolling_metrics(db_path, controls)
-    _render_holdings_and_valuation(db_path)
+    _render_holdings_and_valuation(db_path, include_live_data=not demo_mode)
+    _render_model_update_status(db_path)
     _render_trade_log(db_path)
-    _render_news(db_path)
+    _render_news(db_path, include_live_data=not demo_mode)
+    if os.environ.get("SMA_ENABLE_CHAT", "0") == "1":
+        _render_chat(db_path)
 
 
 def _sidebar_controls() -> dict[str, object]:
@@ -106,13 +117,16 @@ def _sidebar_controls() -> dict[str, object]:
         if use_date_filter:
             start_date = st.date_input("Start date", value=None)
             end_date = st.date_input("End date", value=None)
-        refresh = st.button("Refresh data")
+        demo_mode = os.environ.get("SMA_DEMO_MODE", "0") == "1"
+        auto_refresh = st.checkbox("Auto-refresh market data on launch", value=not demo_mode)
+        refresh = st.button("Refresh market data now")
     return {
         "db_path": resolved_db_path,
         "benchmark": benchmark.strip() or BENCHMARK_TICKER,
         "starting_capital": starting_capital,
         "start_date": start_date.isoformat() if start_date else None,
         "end_date": end_date.isoformat() if end_date else None,
+        "auto_refresh": auto_refresh,
         "refresh": refresh,
     }
 
@@ -123,6 +137,73 @@ def _render_database_setup_warning(validation) -> None:
         st.info("Missing required tables: " + ", ".join(validation.missing_tables))
     st.markdown("Run these setup commands from the project root:")
     st.code("\n".join(SETUP_COMMANDS), language="powershell")
+
+
+def _render_market_data_refresh(db_path: Path, controls: dict[str, object]) -> None:
+    benchmark = str(controls["benchmark"])
+    refresh_key = f"market_data_refreshed::{db_path.resolve()}::{benchmark}"
+    should_auto_refresh = bool(controls.get("auto_refresh")) and not st.session_state.get(refresh_key, False)
+    should_manual_refresh = bool(controls.get("refresh"))
+
+    if should_auto_refresh or should_manual_refresh:
+        with st.spinner("Refreshing market data..."):
+            summary = refresh_dashboard_market_data(db_path, benchmark)
+        st.session_state[refresh_key] = True
+        st.cache_data.clear()
+        _render_refresh_summary(summary)
+
+    freshness = get_dashboard_freshness(db_path, benchmark)
+    with st.expander("Data freshness", expanded=False):
+        st.write(
+            {
+                "Latest model update": freshness.latest_model_update_date,
+                "Latest current-holding prices": freshness.latest_current_holding_price_date,
+                "Current-holding price status": freshness.current_holding_price_status,
+                "Missing current-holding prices": ", ".join(freshness.missing_current_holding_price_tickers) or None,
+                "Latest benchmark price": freshness.latest_benchmark_price_date,
+                "Latest calculated return": freshness.latest_calculated_return_date,
+            }
+        )
+    if freshness.missing_current_holding_price_tickers:
+        st.warning(
+            "Current holdings missing stored prices: "
+            + ", ".join(freshness.missing_current_holding_price_tickers)
+        )
+    notice = pending_model_update_notice(db_path)
+    if notice:
+        st.info(notice)
+
+
+def _render_refresh_summary(summary) -> None:
+    if summary.refreshed_anything:
+        st.success(
+            "Market data refreshed: "
+            f"{summary.holding_price_rows_written} holding price rows, "
+            f"{summary.fx_rows_written} FX rows, "
+            f"{summary.benchmark_rows_written} benchmark rows."
+        )
+    else:
+        latest_dates = [
+            value
+            for value in (summary.latest_holding_price_after, summary.latest_benchmark_price_after)
+            if value is not None
+        ]
+        latest = min(latest_dates) if latest_dates else None
+        message = f"Market data current through {latest}." if latest else "No new market data was available."
+        st.info(message)
+    if summary.missing_holding_price_tickers_after:
+        st.warning(
+            "Current holdings still missing stored prices after refresh: "
+            + ", ".join(summary.missing_holding_price_tickers_after)
+        )
+    if summary.failed_tickers:
+        st.error(
+            "Market-data refresh failed for: "
+            + ", ".join(summary.failed_tickers)
+            + ". Check ticker overrides before relying on calculated returns."
+        )
+    for warning in summary.warnings:
+        st.warning(warning)
 
 
 def _render_data_overview(db_path: Path) -> None:
@@ -154,11 +235,15 @@ def _render_performance(db_path: Path, controls: dict[str, object]) -> None:
         st.warning(f"Performance unavailable: {exc}")
         return
     if portfolio_result.issues:
-        skipped_dates = {issue.date for issue in portfolio_result.issues if issue.issue_type == "skipped_return_date"}
-        st.warning(
-            "Some dates were excluded because required price or FX data was missing. "
-            f"Skipped calculated return dates: {len(skipped_dates)}."
+        st.error(
+            "Calculated portfolio returns are blocked because required holding price or FX data is incomplete. "
+            "Refresh market data or fix ticker overrides before relying on performance."
         )
+        for issue in portfolio_result.issues[:10]:
+            st.warning(issue.message)
+        if len(portfolio_result.issues) > 10:
+            st.warning(f"{len(portfolio_result.issues) - 10} additional price coverage issue(s) not shown.")
+        return
 
     benchmark_series = None
     benchmark_full = None
@@ -371,7 +456,7 @@ def _rolling_metrics_chart(data: pd.DataFrame) -> alt.LayerChart:
     return alt.layer(sharpe, tracking_error).resolve_scale(y="independent").properties(height=320)
 
 
-def _render_holdings_and_valuation(db_path: Path) -> None:
+def _render_holdings_and_valuation(db_path: Path, include_live_data: bool = True) -> None:
     st.header("Holdings And Valuation")
     try:
         holdings = get_latest_holdings_snapshot(db_path)
@@ -384,6 +469,10 @@ def _render_holdings_and_valuation(db_path: Path) -> None:
         hide_index=True,
         use_container_width=True,
     )
+    if not include_live_data:
+        st.info("Live valuation enrichment is disabled in synthetic demo mode.")
+        _render_qtd_holding_returns(db_path)
+        return
     try:
         valuation = get_portfolio_valuation(db_path)
     except (ValuationDataError, HoldingsDataError) as exc:
@@ -396,10 +485,71 @@ def _render_holdings_and_valuation(db_path: Path) -> None:
         st.warning("No valuation data available.")
         return
     st.subheader("Holding Valuation Metrics")
-    st.dataframe(format_valuation_table(valuation.holdings), hide_index=True, use_container_width=True)
+    st.dataframe(
+        prepare_valuation_table_for_display(valuation.holdings),
+        hide_index=True,
+        use_container_width=True,
+        column_config=_valuation_column_config(),
+    )
     st.subheader("Portfolio-Weighted Valuation Averages")
     st.dataframe(format_weighted_valuation_averages(valuation.weighted_averages), hide_index=True, use_container_width=True)
     _render_qtd_holding_returns(db_path)
+
+
+def _valuation_column_config() -> dict[str, object]:
+    """Column configuration for valuation table display.
+
+    - Dividend Yield: format decimal yields as percentages
+    - Market Cap: now a text column (pre-formatted as C$X,XXX,XXX in prepare_valuation_table_for_display)
+    - All others: numeric with appropriate decimal places
+    """
+    return {
+        "Weight": st.column_config.NumberColumn(
+            "Weight", format="%.2f%%"
+        ),
+        "Trailing P/E": st.column_config.NumberColumn(
+            "Trailing P/E", format="%.2f"
+        ),
+        "Forward P/E": st.column_config.NumberColumn(
+            "Forward P/E", format="%.2f"
+        ),
+        "Price / Book": st.column_config.NumberColumn(
+            "Price / Book", format="%.2f"
+        ),
+        "EV / EBITDA": st.column_config.NumberColumn(
+            "EV / EBITDA", format="%.2f"
+        ),
+        "Dividend Yield": st.column_config.NumberColumn(
+            "Dividend Yield", format="percent"
+        ),
+        "Market Cap (CAD)": st.column_config.TextColumn(
+            "Market Cap (CAD)"
+        ),
+    }
+
+
+def _render_model_update_status(db_path: Path) -> None:
+    """Display model update ingestion status and applied-update history."""
+    st.subheader("Model Update Status")
+
+    try:
+        applied = get_model_updates_applied(db_path)
+        if applied.empty:
+            st.info("No model updates have been applied yet.")
+            return
+
+        latest = applied.iloc[0]
+        st.success(
+            f"Latest model applied: **{latest['model_date']}** "
+            f"(ingested {latest['ingested_at'].strftime('%Y-%m-%d %H:%M')})"
+        )
+        st.dataframe(
+            applied[["model_date", "file_name", "ingested_at"]].copy(),
+            hide_index=True,
+            use_container_width=True,
+        )
+    except Exception as exc:
+        st.warning(f"Could not display model update status: {exc}")
 
 
 def _render_qtd_holding_returns(db_path: Path) -> None:
@@ -449,8 +599,11 @@ def _render_trade_log(db_path: Path) -> None:
     st.dataframe(format_trade_log_table(trades), hide_index=True, use_container_width=True)
 
 
-def _render_news(db_path: Path) -> None:
+def _render_news(db_path: Path, include_live_data: bool = True) -> None:
     st.header("News Feed")
+    if not include_live_data:
+        st.info("Live news enrichment is disabled in synthetic demo mode.")
+        return
     try:
         news = get_holding_news(db_path)
     except HoldingsDataError as exc:
@@ -463,6 +616,133 @@ def _render_news(db_path: Path) -> None:
         st.info("No news available.")
         return
     st.dataframe(format_news_table(news), hide_index=True, use_container_width=True)
+
+
+def _render_chat(db_path: Path) -> None:
+    """Render the M5 chatbot panel using the Anthropic tool-calling agent loop.
+
+    Conversation history is stored in st.session_state so it persists across
+    Streamlit reruns. Charts emitted via render_chart are stored in session
+    state and rendered via native Streamlit widgets (no LLM-generated code).
+    """
+    st.header("Portfolio Assistant")
+
+    # --- API key from st.secrets ---
+    api_key: str | None = None
+    try:
+        api_key = st.secrets["ANTHROPIC_API_KEY"]
+    except (KeyError, FileNotFoundError):
+        st.info(
+            "Chatbot requires an Anthropic API key. "
+            "Add `ANTHROPIC_API_KEY = '...'` to `.streamlit/secrets.toml`."
+        )
+        return
+
+    # --- Session state init ---
+    if "chat_display" not in st.session_state:
+        st.session_state["chat_display"] = []  # list of display dicts
+    if "api_messages" not in st.session_state:
+        st.session_state["api_messages"] = []  # Anthropic API message history
+
+    # --- Render existing chat history ---
+    for entry in st.session_state["chat_display"]:
+        role = entry["role"]
+        with st.chat_message(role):
+            if entry.get("content"):
+                st.markdown(entry["content"])
+            for status in entry.get("tool_statuses", []):
+                st.caption(f"Tool: {status}")
+            for chart in entry.get("charts", []):
+                _render_chart_widget(chart)
+
+    # --- User input ---
+    user_input = st.chat_input("Ask about your portfolio…")
+    if not user_input:
+        return
+
+    # Display user message immediately
+    st.session_state["chat_display"].append({"role": "user", "content": user_input})
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    # Run agent loop
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking…"):
+            try:
+                from sma_dashboard.chatbot import run_agent_loop
+                response, updated_messages = run_agent_loop(
+                    user_message=user_input,
+                    messages_history=st.session_state["api_messages"],
+                    db_path=db_path,
+                    api_key=api_key,
+                )
+            except Exception as exc:
+                st.error(f"Agent error: {exc}")
+                return
+
+        st.session_state["api_messages"] = updated_messages
+
+        # Display tool status feedback
+        for status in response.tool_statuses:
+            st.caption(f"Tool: {status}")
+
+        # Display final text
+        if response.text:
+            st.markdown(response.text)
+
+        # Render any charts emitted by render_chart tool
+        for chart in response.charts:
+            _render_chart_widget(chart)
+
+        # Persist assistant turn in display state
+        st.session_state["chat_display"].append({
+            "role": "assistant",
+            "content": response.text,
+            "tool_statuses": response.tool_statuses,
+            "charts": response.charts,
+        })
+
+
+def _render_chart_widget(chart: dict) -> None:
+    """Render a render_chart payload using native Streamlit widgets.
+
+    chart_type determines the widget used. No LLM-generated code is executed
+    (SPEC.md §5 rendering rationale, Path A).
+    """
+    import pandas as pd
+
+    chart_type = chart.get("chart_type")
+    title = chart.get("title", "")
+    data = chart.get("data", {})
+
+    if title:
+        st.caption(title)
+
+    if chart_type == "table":
+        columns = data.get("columns", [])
+        rows = data.get("rows", [])
+        if columns and rows is not None:
+            st.dataframe(pd.DataFrame(rows, columns=columns), use_container_width=True)
+        else:
+            st.info("No table data available.")
+
+    elif chart_type in ("line", "bar"):
+        x_values = data.get("x", [])
+        series_list = data.get("series", [])
+        if not x_values or not series_list:
+            st.info("No chart data available.")
+            return
+        chart_df = pd.DataFrame({"x": x_values})
+        for s in series_list:
+            chart_df[s["name"]] = s.get("values", [])
+        chart_df = chart_df.set_index("x")
+        if chart_type == "line":
+            st.line_chart(chart_df)
+        else:
+            st.bar_chart(chart_df)
+
+    else:
+        st.info(f"Unsupported chart type: {chart_type}")
 
 
 if __name__ == "__main__":

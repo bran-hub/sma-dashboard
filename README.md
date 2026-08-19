@@ -1,145 +1,104 @@
 # SMA Oversight Dashboard
 
-A local Python dashboard for independently monitoring a Separately Managed Account (SMA): model updates, portfolio performance, valuation metrics, trade history, and holding-level news in one Streamlit app.
+[![Tests](https://github.com/bran-hub/sma-dashboard/actions/workflows/tests.yml/badge.svg)](https://github.com/bran-hub/sma-dashboard/actions/workflows/tests.yml)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## Why This Project Exists
+A privacy-first Streamlit dashboard for independently auditing a separately managed account. It turns periodic model updates and market data into a reproducible CAD performance record, holdings view, trade log, risk dashboard, and valuation overview.
 
-External managers often provide periodic holdings updates and performance reporting, but those reports are difficult to audit independently. This project rebuilds the oversight layer from local source files and public market data so an account owner can validate performance, review allocation changes, and monitor current holdings without relying only on manager-provided summaries.
+The repository is a synthetic portfolio project: no real holdings, account files, manager reports, returns, or credentials are included.
 
-The repo is packaged as a privacy-safe portfolio project. It demonstrates data ingestion, SQLite modeling, CAD performance calculations, dashboard design, and defensive handling of incomplete market data without including private holdings, returns, account files, or secrets.
-
-## What The Dashboard Does
-
-- Ingests external manager model-update workbooks into a local SQLite database.
-- Normalizes tickers into yfinance-compatible symbols.
-- Stores holdings snapshots, trade records, prices, FX rates, rejected rows, and seeded historical returns.
-- Calculates CAD time-weighted returns against a Canadian equity benchmark.
-- Displays performance, risk, valuation, holdings, trades, and news in a local Streamlit dashboard.
-- Surfaces data-quality warnings when required prices or FX data are missing.
-
-## Key Features
-
-- **Performance view**: hypothetical CAD growth, period returns, benchmark comparison, rolling risk metrics, and trailing annualized returns.
-- **Risk metrics**: volatility, maximum drawdown, Sharpe ratio, beta, alpha, tracking error, and information ratio.
-- **Two-phase track record**: historical manager-reported returns can seed the period before detailed holdings data is available; later periods are calculated from holdings and market data.
-- **Valuation layer**: per-holding fundamentals and portfolio-weighted averages using yfinance data.
-- **Trade audit**: parsed buys, sells, trims, and adds with date/action filters.
-- **News feed**: recent yfinance news tagged to current holdings and portfolio weights.
-- **Privacy-first local workflow**: raw workbooks, local databases, seeded return files, local overrides, `.env` files, and Streamlit secrets are ignored by git.
-
-## Architecture
-
-The project is intentionally small and local-first:
-
-| Layer | Choice |
-|---|---|
-| Language | Python |
-| App UI | Streamlit |
-| Storage | SQLite |
-| Market data | yfinance |
-| Data processing | pandas |
-| Tests | pytest |
-
-Core modules live under `sma_dashboard/`:
-
-- `ingestion.py`: model-update parsing, ticker normalization, row validation, price and FX loading.
-- `batch_ingestion.py`: ordered ingestion of multiple private model-update files from a local manifest.
-- `seeded_returns.py`: loading historical seeded return data from a private local export.
-- `performance.py`: CAD TWR, benchmark comparison, period returns, and risk metrics.
-- `valuation.py`: holding-level and weighted-average valuation metrics.
-- `news.py`: holding-level news aggregation.
-- `dashboard.py` and `dashboard_support.py`: Streamlit UI and dashboard-safe helpers.
-
-More detail is available in:
-
-- [Architecture](docs/ARCHITECTURE.md)
-- [Design Decisions](docs/DESIGN_DECISIONS.md)
-- [Privacy](docs/PRIVACY.md)
-- [Roadmap](docs/ROADMAP.md)
-
-## Design Decisions And Tradeoffs
-
-- **Local-first instead of hosted**: simpler privacy posture for a personal finance project; no authentication or deployment layer is required for the current scope.
-- **SQLite instead of flat files**: holdings, trades, prices, FX rates, seeded returns, and rejected rows need relational joins and reproducible local state.
-- **yfinance only**: free and sufficient for a portfolio project; a production version would likely use a paid market-data vendor.
-- **TWR only**: time-weighted return isolates manager investment decisions from account-owner cash-flow timing. Money-weighted return and IRR are intentionally out of scope.
-- **CAD-only performance output**: Canadian listings are treated as CAD; USD-listed holdings are converted using stored `CADUSD=X` FX rates.
-- **Strict missing-data behavior**: calculations fail or warn when active holdings lack required prices or FX data rather than silently renormalizing the remaining holdings.
-- **No chatbot in the current implementation**: a conversational layer is future work and is not included in this portfolio package.
-
-## Privacy And Data Handling
-
-This repository does not include private holdings, real model-update workbooks, private seeded returns, account databases, API keys, Streamlit secrets, or local ticker override files.
-
-Private local inputs should stay in ignored paths such as:
-
-- `data/raw/`
-- `data/db/`
-- `config/ticker_overrides.local.json`
-- `.env` / `.env.*`
-- `.streamlit/secrets.toml`
-
-Only synthetic examples and placeholders should be committed. See [Privacy](docs/PRIVACY.md) for the repo packaging rules.
-
-## Local Setup
-
-Create and activate a virtual environment:
+## Try the synthetic demo
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install -e ".[dev]"
+python run_demo.py
 ```
 
-Initialize a local SQLite database:
+`run_demo.py` deterministically builds `data/db/sma_demo.db` and launches Streamlit without downloading market data. The generated holdings, trades, prices, FX rates, and returns are fictional and safe to regenerate or delete.
+
+## What it demonstrates
+
+- Atomic, idempotent workbook ingestion with rejected-row auditing.
+- Explicit CAD/USD security currency, including local overrides for ambiguous symbols.
+- CAD time-weighted returns, a Canadian equity benchmark, trailing returns, and rolling risk metrics.
+- Holdings snapshots that become effective on the next observed trading day.
+- Buy-and-hold weight drift between snapshots, with residual cash treated as zero-return exposure.
+- Local SQLite storage and a Streamlit UI with clear missing-data states.
+- Optional live valuation and news enrichment through yfinance.
+
+## Architecture
+
+| Layer | Implementation |
+|---|---|
+| UI | Streamlit and Altair |
+| Analytics | pandas-based CAD TWR and risk calculations |
+| Storage | SQLite |
+| Inputs | Excel model updates, seeded return CSVs, yfinance |
+| Quality | pytest and GitHub Actions on Python 3.11/3.12 |
+
+See [Architecture](docs/ARCHITECTURE.md), [Methodology](docs/METHODOLOGY.md), [Privacy](docs/PRIVACY.md), and [Roadmap](docs/ROADMAP.md).
+
+## Use with private local data
+
+Initialize the database:
 
 ```powershell
 python init_db.py --db data/db/sma_dashboard.db
 ```
 
-Ingest a private model-update workbook:
+Copy the example ticker override files to ignored `.local.json` files if needed, then ingest one update:
 
 ```powershell
-python ingestion.py --file data/raw/manager_model_update_YYYY-MM-DD.xlsx --model-date YYYY-MM-DD
+python ingestion.py `
+  --file data/raw/manager_model_update_YYYY-MM-DD.xlsx `
+  --model-date YYYY-MM-DD `
+  --db data/db/sma_dashboard.db `
+  --ticker-overrides config/ticker_overrides.local.json `
+  --ticker-currency-overrides config/ticker_currency_overrides.local.json
 ```
 
-For offline validation without market-data calls:
+Use `--skip-market-data` for offline parsing and validation. Re-running an applied model date is rejected by default; use `--replace-date` only for an intentional atomic replacement.
+
+Load a sequence from a private manifest:
 
 ```powershell
-python ingestion.py --file data/raw/manager_model_update_YYYY-MM-DD.xlsx --model-date YYYY-MM-DD --skip-market-data
+python ingest_model_updates.py `
+  --manifest data/raw/model_updates_manifest.csv `
+  --db data/db/sma_dashboard.db `
+  --config config/column_mapping.json `
+  --ticker-overrides config/ticker_overrides.local.json `
+  --ticker-currency-overrides config/ticker_currency_overrides.local.json
 ```
 
-Run the dashboard:
+Run the app:
 
 ```powershell
+$env:SMA_DASHBOARD_DB = "data/db/sma_dashboard.db"
 streamlit run dashboard.py
 ```
 
-The dashboard defaults to `data/db/sma_dashboard.db`. You can override the SQLite database path from the sidebar.
+## Methodology in brief
 
-## Testing And Quality
+Performance is daily, CAD-denominated time-weighted return. A holdings snapshot dated on day _t_ is applied starting with the next observed trading day, preventing same-day look-ahead. Target weights initialize the portfolio at each new snapshot; security weights then drift with relative returns until the next snapshot. Weight below 100% is residual cash earning 0%; long-only snapshots above 100% are rejected. Missing prices or required FX rates are surfaced rather than silently dropping and renormalizing positions.
 
-Run the test suite:
+This is an oversight and software-engineering project, not brokerage, accounting, tax, or investment-advice software. yfinance data is convenient for demonstration but does not carry production service guarantees.
+
+## Tests
 
 ```powershell
-pytest
+python -m pytest
+python -m sma_dashboard.demo --output data/db/demo-smoke.db
 ```
 
-The tests cover schema creation, ingestion behavior, seeded returns, performance calculations, valuation logic, dashboard helpers, and news handling. The code is organized so core calculations can be tested independently of the Streamlit interface.
+The suite covers schema migrations, ingestion rollback/idempotency, currency classification, performance timing and drift, valuation, dashboard helpers, transcripts, and the optional assistant tools.
 
-## Roadmap
+## Privacy
 
-Implemented:
+Keep real inputs in ignored paths such as `data/raw/`, `data/db/`, `.streamlit/secrets.toml`, and local override files. Public releases are produced through an allowlisted export with filename/content deny checks; private development history is never merged into the public repository. See [Privacy](docs/PRIVACY.md).
 
-- M1: SQLite schema, model-update ingestion, row validation, price/FX storage.
-- M2: CAD performance engine, benchmark comparison, seeded/calculated track record.
-- M3: valuation metrics and holding-level news.
-- M4: local Streamlit dashboard.
+## License
 
-Future work:
-
-- M5: optional chatbot layer over portfolio data and manager commentary.
-- Corporate-action adjustment workflow.
-- Sector/factor exposure analysis.
-- More complete synthetic sample dataset for public demos.
+MIT. See [LICENSE](LICENSE).

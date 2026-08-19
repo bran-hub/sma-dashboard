@@ -11,7 +11,7 @@ import pandas as pd
 
 from sma_dashboard.db import DEFAULT_DB_PATH, connect
 from sma_dashboard.holdings import get_latest_holdings_snapshot
-from sma_dashboard.ingestion import FX_PAIR, is_usd_listed
+from sma_dashboard.ingestion import FX_PAIR
 
 
 INFO_FIELD_MAP = {
@@ -63,7 +63,7 @@ def get_holding_valuations(
             else:
                 value = _clean_number(info.get(source_field))
             if metric == "market_cap":
-                value = _market_cap_to_cad(holding.ticker, value, fx_rate)
+                value = _market_cap_to_cad(holding.ticker, value, fx_rate, holding.currency)
             row[metric] = value
         rows.append(row)
     return pd.DataFrame(rows)
@@ -152,10 +152,15 @@ def _latest_cadusd_rate(db_path: Path | str) -> float | None:
     return None if row is None else float(row[0])
 
 
-def _market_cap_to_cad(ticker: str, market_cap: float | None, cadusd_rate: float | None) -> float | None:
+def _market_cap_to_cad(
+    ticker: str,
+    market_cap: float | None,
+    cadusd_rate: float | None,
+    currency: str,
+) -> float | None:
     if market_cap is None:
         return None
-    if not is_usd_listed(ticker):
+    if currency != "USD":
         return market_cap
     if cadusd_rate is None:
         raise ValuationDataError(

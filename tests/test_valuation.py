@@ -156,12 +156,13 @@ def _load_holdings_fixture() -> None:
 
 
 def _insert_holding(snapshot_date: str, ticker: str, weight: float) -> None:
+    currency = "CAD" if ticker.endswith((".TO", ".V", ".NE", ".CN")) else "USD"
     _execute(
         """
-        INSERT INTO holdings (date, ticker, weight, shares, cost_basis)
-        VALUES (?, ?, ?, NULL, NULL)
+        INSERT INTO holdings (date, ticker, weight, currency, shares, cost_basis)
+        VALUES (?, ?, ?, ?, NULL, NULL)
         """,
-        (snapshot_date, ticker, weight),
+        (snapshot_date, ticker, weight, currency),
     )
 
 

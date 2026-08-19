@@ -12,6 +12,7 @@ from sma_dashboard.performance import (
     BENCHMARK_TICKER,
     FX_PAIR,
     PerformanceDataError,
+    audit_price_coverage,
     calculate_daily_portfolio_returns,
     calculate_daily_portfolio_returns_with_quality,
     calculate_benchmark_twr_series,
@@ -85,6 +86,49 @@ class PerformanceTests(unittest.TestCase):
         self.assertAlmostEqual(returns.iloc[0]["daily_return"], 0.10)
         self.assertAlmostEqual(returns.iloc[1]["daily_return"], -0.0963636364)
         self.assertAlmostEqual(returns.iloc[2]["daily_return"], 0.10)
+
+    def test_weights_drift_between_model_snapshots(self) -> None:
+        init_db(TEST_DB)
+        _insert_seeded_return("2025-01-31", 0.0)
+        _insert_holding("2025-02-01", "AAA.TO", 50.0)
+        _insert_holding("2025-02-01", "BBB.TO", 50.0)
+        for row in [
+            ("2025-01-31", "AAA.TO", 100.0),
+            ("2025-02-03", "AAA.TO", 200.0),
+            ("2025-02-04", "AAA.TO", 200.0),
+            ("2025-01-31", "BBB.TO", 100.0),
+            ("2025-02-03", "BBB.TO", 100.0),
+            ("2025-02-04", "BBB.TO", 130.0),
+        ]:
+            _insert_price(*row)
+
+        returns = calculate_daily_portfolio_returns(TEST_DB)
+
+        self.assertAlmostEqual(returns.iloc[0]["daily_return"], 0.50)
+        # AAA drifts to 2/3 of invested value after day one, leaving BBB at 1/3.
+        self.assertAlmostEqual(returns.iloc[1]["daily_return"], 0.10)
+
+    def test_new_snapshot_becomes_effective_next_trading_day(self) -> None:
+        init_db(TEST_DB)
+        _insert_seeded_return("2025-01-31", 0.0)
+        _insert_holding("2025-02-01", "AAA.TO", 100.0)
+        _insert_holding("2025-02-01", "BBB.TO", 0.0)
+        _insert_holding("2025-02-03", "AAA.TO", 0.0)
+        _insert_holding("2025-02-03", "BBB.TO", 100.0)
+        for row in [
+            ("2025-01-31", "AAA.TO", 100.0),
+            ("2025-02-03", "AAA.TO", 110.0),
+            ("2025-02-04", "AAA.TO", 110.0),
+            ("2025-01-31", "BBB.TO", 100.0),
+            ("2025-02-03", "BBB.TO", 100.0),
+            ("2025-02-04", "BBB.TO", 120.0),
+        ]:
+            _insert_price(*row)
+
+        returns = calculate_daily_portfolio_returns(TEST_DB)
+
+        self.assertAlmostEqual(returns.iloc[0]["daily_return"], 0.10)
+        self.assertAlmostEqual(returns.iloc[1]["daily_return"], 0.20)
 
     def test_twr_cumulative_chains_seeded_and_calculated_phases(self) -> None:
         _load_standard_fixture()
@@ -255,6 +299,42 @@ class PerformanceTests(unittest.TestCase):
         with self.assertRaisesRegex(PerformanceDataError, "CADUSD=X"):
             calculate_daily_portfolio_returns(TEST_DB)
 
+    def test_price_coverage_audit_detects_active_holding_without_prices(self) -> None:
+        init_db(TEST_DB)
+        _insert_seeded_return("2025-01-31", 0.0)
+        _insert_holding("2025-02-01", "RY.TO", 50.0)
+        _insert_holding("2025-02-01", "SHOP.TO", 50.0)
+        _insert_price("2025-01-31", "RY.TO", 100.0)
+        _insert_price("2025-02-03", "RY.TO", 110.0)
+
+        report = audit_price_coverage(TEST_DB)
+
+        self.assertFalse(report.is_complete)
+        self.assertTrue(any(issue.issue_type == "missing_price" and issue.ticker == "SHOP.TO" for issue in report.issues))
+
+    def test_price_coverage_audit_detects_missing_prior_price(self) -> None:
+        init_db(TEST_DB)
+        _insert_seeded_return("2025-01-31", 0.0)
+        _insert_holding("2025-02-01", "RY.TO", 100.0)
+        _insert_price("2025-02-03", "RY.TO", 110.0)
+
+        report = audit_price_coverage(TEST_DB)
+
+        self.assertFalse(report.is_complete)
+        self.assertTrue(any("prior price" in issue.message for issue in report.issues))
+
+    def test_price_coverage_audit_detects_usd_holding_missing_fx(self) -> None:
+        init_db(TEST_DB)
+        _insert_seeded_return("2025-01-31", 0.0)
+        _insert_holding("2025-02-01", "AAPL", 100.0)
+        _insert_price("2025-01-31", "AAPL", 100.0)
+        _insert_price("2025-02-03", "AAPL", 110.0)
+
+        report = audit_price_coverage(TEST_DB)
+
+        self.assertFalse(report.is_complete)
+        self.assertTrue(any(issue.issue_type == "missing_fx" and issue.ticker == "AAPL" for issue in report.issues))
+
     def test_five_day_chart_range_uses_observations_not_calendar_days(self) -> None:
         from sma_dashboard.dashboard_support import filter_performance_window
 
@@ -278,12 +358,13 @@ class PerformanceTests(unittest.TestCase):
         init_db(TEST_DB)
         _insert_seeded_return("2025-01-31", 0.0)
         _insert_holding("2025-02-01", "RY.TO", 100.0)
+        _insert_price("2025-01-31", "RY.TO", 99.0)
         _insert_price("2025-02-07", "RY.TO", 100.0)
         _insert_price("2025-02-10", "RY.TO", 101.0)
 
         returns = calculate_daily_portfolio_returns(TEST_DB)
 
-        self.assertEqual(returns["date"].tolist(), ["2025-02-10"])
+        self.assertEqual(returns["date"].tolist(), ["2025-02-07", "2025-02-10"])
 
     def test_missing_benchmark_date_does_not_create_fake_benchmark_return(self) -> None:
         init_db(TEST_DB)
@@ -304,10 +385,10 @@ class PerformanceTests(unittest.TestCase):
         _insert_price("2025-02-03", "RY.TO", 110.0)
         _insert_price("2025-01-31", "SHOP.TO", 100.0)
 
-        with self.assertRaisesRegex(PerformanceDataError, "Missing price return"):
+        with self.assertRaisesRegex(PerformanceDataError, "SHOP.TO"):
             calculate_daily_portfolio_returns(TEST_DB)
 
-    def test_dashboard_mode_skips_missing_price_dates_and_reports_issues(self) -> None:
+    def test_dashboard_mode_blocks_missing_price_dates_and_reports_issues(self) -> None:
         init_db(TEST_DB)
         _insert_seeded_return("2025-01-31", 0.0)
         _insert_holding("2025-02-01", "RY.TO", 50.0)
@@ -323,11 +404,11 @@ class PerformanceTests(unittest.TestCase):
 
         result = calculate_daily_portfolio_returns_with_quality(TEST_DB, strict=False)
 
-        self.assertEqual(result.data["date"].tolist(), ["2025-02-04"])
+        self.assertTrue(result.data.empty)
         self.assertTrue(any(issue.issue_type == "missing_price" for issue in result.issues))
         self.assertTrue(any(issue.issue_type == "skipped_return_date" for issue in result.issues))
 
-    def test_dashboard_twr_mode_returns_seeded_plus_valid_calculated_rows(self) -> None:
+    def test_dashboard_twr_mode_returns_seeded_only_when_calculated_coverage_is_incomplete(self) -> None:
         init_db(TEST_DB)
         _insert_seeded_return("2025-01-31", 1.0)
         _insert_holding("2025-02-01", "RY.TO", 50.0)
@@ -343,8 +424,8 @@ class PerformanceTests(unittest.TestCase):
 
         result = calculate_twr_series_with_quality(TEST_DB, strict=False)
 
-        self.assertEqual(result.data["date"].tolist(), ["2025-01-31", "2025-02-04"])
-        self.assertEqual(result.data["phase"].tolist(), ["seeded", "calculated"])
+        self.assertEqual(result.data["date"].tolist(), ["2025-01-31"])
+        self.assertEqual(result.data["phase"].tolist(), ["seeded"])
         self.assertTrue(result.issues)
 
     def test_missing_fx_for_active_usd_holding_is_reported_in_dashboard_mode(self) -> None:
@@ -358,7 +439,6 @@ class PerformanceTests(unittest.TestCase):
 
         self.assertTrue(result.data.empty)
         self.assertTrue(any(issue.issue_type == "missing_fx" for issue in result.issues))
-        self.assertTrue(any(issue.issue_type == "skipped_return_date" for issue in result.issues))
     def test_missing_holding_data_is_not_silently_ignored_or_renormalized(self) -> None:
         init_db(TEST_DB)
         _insert_seeded_return("2025-01-31", 0.0)
@@ -508,12 +588,13 @@ def _insert_seeded_return(seed_date: str, return_pct: float, benchmark_return_pc
 
 
 def _insert_holding(snapshot_date: str, ticker: str, weight: float) -> None:
+    currency = "CAD" if ticker.endswith((".TO", ".V", ".NE", ".CN")) else "USD"
     _execute(
         """
-        INSERT INTO holdings (date, ticker, weight, shares, cost_basis)
-        VALUES (?, ?, ?, NULL, NULL)
+        INSERT INTO holdings (date, ticker, weight, currency, shares, cost_basis)
+        VALUES (?, ?, ?, ?, NULL, NULL)
         """,
-        (snapshot_date, ticker, weight),
+        (snapshot_date, ticker, weight, currency),
     )
 
 

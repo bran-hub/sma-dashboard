@@ -1,7 +1,7 @@
 [project]
 name = "sma-dashboard"
-version = "0.1.0"
-description = "Local SMA oversight dashboard data foundation."
+version = "0.2.0"
+description = "Privacy-first SMA oversight dashboard with reproducible CAD performance analytics."
 requires-python = ">=3.11"
 dependencies = [
     "altair>=5.0.0",
@@ -15,3 +15,22 @@ dependencies = [
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-p no:cacheprovider"
+
+[project.optional-dependencies]
+chatbot = [
+    "anthropic>=0.3.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["sma_dashboard*"]
+
+[tool.setuptools.package-data]
+sma_dashboard = ["schema.sql"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

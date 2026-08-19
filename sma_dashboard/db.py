@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "db" / "sma_dashboard.sqlite"
+DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "db" / "sma_dashboard.db"
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 
@@ -31,9 +31,20 @@ def init_db(db_path: Path | str = DEFAULT_DB_PATH) -> Path:
 
 def _run_migrations(conn: sqlite3.Connection) -> None:
     """Apply small additive migrations for existing local SQLite databases."""
-    columns = {
+    seeded_columns = {
         row[1]
         for row in conn.execute("PRAGMA table_info(seeded_returns)").fetchall()
     }
-    if "benchmark_return_pct" not in columns:
+    if "benchmark_return_pct" not in seeded_columns:
         conn.execute("ALTER TABLE seeded_returns ADD COLUMN benchmark_return_pct REAL")
+
+    holdings_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(holdings)").fetchall()
+    }
+    if "currency" not in holdings_columns:
+        # Existing private holdings are CAD-listed; future ingestions persist
+        # explicit currency instead of inferring it during calculations.
+        conn.execute(
+            "ALTER TABLE holdings ADD COLUMN currency TEXT NOT NULL DEFAULT 'CAD'"
+        )

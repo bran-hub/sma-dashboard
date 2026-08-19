@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS holdings (
     date TEXT NOT NULL,
     ticker TEXT NOT NULL,
     weight REAL NOT NULL,
+    currency TEXT NOT NULL DEFAULT 'CAD' CHECK (currency IN ('CAD', 'USD')),
     shares REAL,
     cost_basis REAL,
     PRIMARY KEY (date, ticker)
@@ -66,6 +67,17 @@ CREATE TABLE IF NOT EXISTS rejected_rows (
     source_file TEXT NOT NULL,
     raw_row_data TEXT NOT NULL,
     reason TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS model_updates_applied (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_date DATE NOT NULL,
+    file_name TEXT,
+    source TEXT,
+    ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ingested_by TEXT,
+    notes TEXT,
+    UNIQUE(model_date)
 );
 
 CREATE INDEX IF NOT EXISTS idx_holdings_date ON holdings (date);

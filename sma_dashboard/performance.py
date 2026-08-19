@@ -12,7 +12,7 @@ from typing import Literal
 import pandas as pd
 
 from sma_dashboard.db import DEFAULT_DB_PATH, connect, init_db
-from sma_dashboard.ingestion import FX_PAIR, _download_price_frame, _price_rows_from_frame, is_usd_listed
+from sma_dashboard.ingestion import FX_PAIR, _download_price_frame, _price_rows_from_frame
 
 
 BENCHMARK_TICKER = "^GSPTSE"
@@ -54,6 +54,15 @@ class PerformanceDataIssue:
 
 
 @dataclass(frozen=True)
+class PriceCoverageReport:
+    issues: list[PerformanceDataIssue]
+
+    @property
+    def is_complete(self) -> bool:
+        return not self.issues
+
+
+@dataclass(frozen=True)
 class PerformanceCalculationResult:
     data: pd.DataFrame
     issues: list[PerformanceDataIssue]
@@ -84,8 +93,9 @@ def calculate_daily_portfolio_returns(
 ) -> pd.DataFrame:
     """Calculate daily CAD TWR inputs from holdings snapshots and adjusted prices.
 
-    Each trading day uses the latest holdings snapshot available as of that date.
-    The daily portfolio return is the weighted sum of each holding's CAD return.
+    A holdings snapshot becomes effective on the next observed trading day.
+    Snapshot weights then drift with security returns until the next snapshot;
+    any residual allocation is treated as zero-return cash.
     TWR is used because this project evaluates manager decisions independent of
     contribution or withdrawal timing; MWR/IRR is intentionally out of scope.
     """
@@ -106,16 +116,29 @@ def calculate_daily_portfolio_returns_with_quality(
     """Calculate daily portfolio returns and optionally collect data-quality issues.
 
     Strict mode raises as soon as required price or FX data is missing. Dashboard
-    mode skips affected dates, reports issues, and never renormalizes remaining
-    holdings or treats missing equity data as cash.
+    mode returns blocking issues instead of partial calculated returns, and never
+    renormalizes remaining holdings or treats missing equity data as cash.
     """
     holdings = _load_holdings(db_path)
     if holdings.empty:
         raise PerformanceDataError("No holdings rows found; cannot calculate portfolio returns.")
 
+    coverage = audit_price_coverage(db_path, start_date=start_date, end_date=end_date)
+    if not coverage.is_complete:
+        if strict:
+            raise PerformanceDataError(_coverage_error_message(coverage.issues))
+        return PerformanceCalculationResult(pd.DataFrame(columns=["date", "daily_return", "phase"]), coverage.issues)
+
     issues: list[PerformanceDataIssue] = []
-    tickers = sorted(holdings["ticker"].unique())
-    prices = _load_cad_adjusted_prices(db_path, tickers, strict=strict, issues=issues)
+    tickers = [ticker for ticker, _ in _active_holdings_in_period(holdings, pd.Timestamp(start_date), pd.Timestamp(end_date) if end_date else None)]
+    currencies = {ticker: _holding_currency(holdings, ticker) for ticker in tickers}
+    prices = _load_cad_adjusted_prices(
+        db_path,
+        tickers,
+        currencies=currencies,
+        strict=strict,
+        issues=issues,
+    )
     returns = _calculate_price_returns(prices)
     start = pd.Timestamp(start_date)
     end = pd.Timestamp(end_date) if end_date else returns.index.max()
@@ -134,14 +157,20 @@ def calculate_daily_portfolio_returns_with_quality(
         raise PerformanceDataError("No price returns available for held tickers.")
 
     rows: list[dict[str, object]] = []
+    current_weights: dict[str, float] = {}
+    applied_snapshot_date: pd.Timestamp | None = None
     for day in returns.loc[(returns.index >= start) & (returns.index <= end)].index:
-        snapshot = _latest_holdings_snapshot(holdings, day)
+        snapshot = _latest_holdings_snapshot(holdings, day, effective_next_day=True)
         if snapshot.empty:
             continue
-        active = _active_holdings(snapshot)
-        if active.empty:
+        snapshot_date = pd.Timestamp(snapshot["date"].iloc[0])
+        if applied_snapshot_date is None or snapshot_date != applied_snapshot_date:
+            current_weights = _snapshot_weights(snapshot)
+            applied_snapshot_date = snapshot_date
+        if not current_weights:
             continue
-        day_returns = returns.loc[day, active["ticker"]]
+        active_tickers = list(current_weights)
+        day_returns = returns.loc[day, active_tickers]
         missing = day_returns[day_returns.isna()].index.tolist()
         if missing:
             if day_returns.isna().all():
@@ -166,21 +195,145 @@ def calculate_daily_portfolio_returns_with_quality(
                     message=f"Skipped portfolio return date {day.date().isoformat()} because required data was missing.",
                 )
             )
+            if not strict:
+                return PerformanceCalculationResult(pd.DataFrame(columns=["date", "daily_return", "phase"]), issues)
             continue
-        weights = _weights_to_decimal(active["weight"])
+        portfolio_return = float(
+            sum(current_weights[ticker] * float(day_returns[ticker]) for ticker in active_tickers)
+        )
         rows.append(
             {
                 "date": day.date().isoformat(),
-                "daily_return": float((weights.to_numpy() * day_returns.to_numpy()).sum()),
+                "daily_return": portfolio_return,
                 "phase": "calculated",
             }
         )
+        gross_portfolio = 1.0 + portfolio_return
+        if gross_portfolio <= 0:
+            raise PerformanceDataError(
+                f"Portfolio value became non-positive on {day.date().isoformat()}."
+            )
+        current_weights = {
+            ticker: current_weights[ticker] * (1.0 + float(day_returns[ticker])) / gross_portfolio
+            for ticker in active_tickers
+        }
 
     if not rows and not strict and issues:
         return PerformanceCalculationResult(pd.DataFrame(columns=["date", "daily_return", "phase"]), issues)
     if not rows:
         raise PerformanceDataError("No calculated daily returns available for the requested date range.")
     return PerformanceCalculationResult(pd.DataFrame(rows), issues)
+
+
+def audit_price_coverage(
+    db_path: Path | str = DEFAULT_DB_PATH,
+    start_date: str = CALCULATED_START_DATE,
+    end_date: str | None = None,
+) -> PriceCoverageReport:
+    """Check that active holdings have enough price/FX data before returns are calculated."""
+    holdings = _load_holdings(db_path)
+    if holdings.empty:
+        return PriceCoverageReport(
+            [
+                PerformanceDataIssue(
+                    issue_type="missing_holdings",
+                    date="",
+                    ticker=None,
+                    message="No holdings rows found; cannot audit price coverage.",
+                )
+            ]
+        )
+
+    audit_start = pd.Timestamp(start_date)
+    audit_end = pd.Timestamp(end_date) if end_date else None
+    active = _active_holdings_in_period(holdings, audit_start, audit_end)
+    issues: list[PerformanceDataIssue] = []
+
+    for ticker, first_active_date in active:
+        prices = _load_price_series(db_path, ticker)
+        if prices.empty:
+            issues.append(
+                PerformanceDataIssue(
+                    issue_type="missing_price",
+                    date=pd.Timestamp(first_active_date).date().isoformat(),
+                    ticker=ticker,
+                    message=(
+                        f"Missing stored prices for active holding {ticker}. "
+                        "Refresh market data or add a local ticker override."
+                    ),
+                )
+            )
+            continue
+
+        usable = prices.dropna(subset=["adj_close"])
+        if usable.empty:
+            issues.append(
+                PerformanceDataIssue(
+                    issue_type="missing_price",
+                    date=pd.Timestamp(first_active_date).date().isoformat(),
+                    ticker=ticker,
+                    message=f"No usable adjusted prices for active holding {ticker}.",
+                )
+            )
+            continue
+
+        coverage_start = max(pd.Timestamp(first_active_date), audit_start)
+        if usable[usable.index < coverage_start].empty:
+            issues.append(
+                PerformanceDataIssue(
+                    issue_type="missing_price",
+                    date=coverage_start.date().isoformat(),
+                    ticker=ticker,
+                    message=f"Missing prior price for {ticker} before first calculated return date {coverage_start.date().isoformat()}.",
+                )
+            )
+        if usable[usable.index >= coverage_start].empty:
+            issues.append(
+                PerformanceDataIssue(
+                    issue_type="missing_price",
+                    date=coverage_start.date().isoformat(),
+                    ticker=ticker,
+                    message=f"Missing price observations for {ticker} on or after {coverage_start.date().isoformat()}.",
+                )
+            )
+        if audit_end is not None and usable[usable.index <= audit_end].empty:
+            issues.append(
+                PerformanceDataIssue(
+                    issue_type="missing_price",
+                    date=audit_end.date().isoformat(),
+                    ticker=ticker,
+                    message=f"Missing price observations for {ticker} through requested end date {audit_end.date().isoformat()}.",
+                )
+            )
+
+        if _holding_currency(holdings, ticker) == "USD":
+            start = usable.index.min().date().isoformat()
+            end = (audit_end if audit_end is not None else usable.index.max()).date().isoformat()
+            try:
+                fx = _load_fx_series(db_path, start, end)
+            except PerformanceDataError as exc:
+                issues.append(
+                    PerformanceDataIssue(
+                        issue_type="missing_fx",
+                        date=start,
+                        ticker=ticker,
+                        message=str(exc),
+                    )
+                )
+                continue
+            missing_fx_dates = usable.loc[(usable.index >= pd.Timestamp(start)) & (usable.index <= pd.Timestamp(end))].index.difference(fx.index)
+            if not missing_fx_dates.empty:
+                sample = missing_fx_dates[0].date().isoformat()
+                issues.append(
+                    PerformanceDataIssue(
+                        issue_type="missing_fx",
+                        date=sample,
+                        ticker=ticker,
+                        message=f"Missing {FX_PAIR} FX rate for USD-listed ticker {ticker} on {sample}.",
+                    )
+                )
+
+    return PriceCoverageReport(issues)
 
 
 def calculate_twr_series(
@@ -461,8 +614,9 @@ def calculate_qtd_holding_price_returns(
         start_price_date, start_price = start_row
         end_price_date, end_price = end_row
         try:
-            start_cad = _price_to_cad(db_path, ticker, start_price_date, start_price)
-            end_cad = _price_to_cad(db_path, ticker, end_price_date, end_price)
+            currency = str(holding.currency)
+            start_cad = _price_to_cad(db_path, ticker, start_price_date, start_price, currency)
+            end_cad = _price_to_cad(db_path, ticker, end_price_date, end_price, currency)
         except PerformanceDataError as exc:
             issues.append(_holding_issue("missing_fx", end_price_date, ticker, str(exc)))
             continue
@@ -556,12 +710,46 @@ def _yfinance_inclusive_end(end_date: str) -> str:
 def _load_holdings(db_path: Path | str) -> pd.DataFrame:
     with closing(connect(db_path)) as conn:
         frame = pd.read_sql_query(
-            "SELECT date, ticker, weight FROM holdings ORDER BY date, ticker",
+            "SELECT date, ticker, weight, currency FROM holdings ORDER BY date, ticker",
             conn,
         )
     if not frame.empty:
         frame["date"] = pd.to_datetime(frame["date"])
     return frame
+
+
+def _active_holdings_in_period(
+    holdings: pd.DataFrame,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp | None,
+) -> list[tuple[str, pd.Timestamp]]:
+    if holdings.empty:
+        return []
+    eligible = holdings.copy()
+    if end_date is not None:
+        eligible = eligible[eligible["date"] <= end_date]
+    first_active: dict[str, pd.Timestamp] = {}
+    for snapshot_date in sorted(eligible["date"].drop_duplicates()):
+        snapshot = eligible[eligible["date"] == snapshot_date]
+        active = _active_holdings(snapshot)
+        for ticker in active["ticker"].astype(str):
+            first_active[ticker] = min(first_active.get(ticker, pd.Timestamp(snapshot_date)), pd.Timestamp(snapshot_date))
+    return sorted(
+        (
+            ticker,
+            max(first_date, start_date) if first_date < start_date else first_date,
+        )
+        for ticker, first_date in first_active.items()
+    )
+
+
+def _coverage_error_message(issues: list[PerformanceDataIssue]) -> str:
+    if not issues:
+        return "Price coverage is incomplete."
+    details = "; ".join(issue.message for issue in issues[:5])
+    if len(issues) > 5:
+        details += f"; and {len(issues) - 5} more issue(s)"
+    return "Price coverage is incomplete for active holdings. " + details
 
 
 def _load_current_active_holdings(db_path: Path | str) -> pd.DataFrame:
@@ -571,7 +759,7 @@ def _load_current_active_holdings(db_path: Path | str) -> pd.DataFrame:
             raise PerformanceDataError("No holdings rows found; cannot rank holding returns.")
         frame = pd.read_sql_query(
             """
-            SELECT date, ticker, weight
+            SELECT date, ticker, weight, currency
             FROM holdings
             WHERE date = ?
             ORDER BY ticker
@@ -663,6 +851,7 @@ def _try_calculated_benchmark_returns(
 def _load_cad_adjusted_prices(
     db_path: Path | str,
     tickers: list[str],
+    currencies: dict[str, str] | None = None,
     strict: bool = True,
     issues: list[PerformanceDataIssue] | None = None,
 ) -> pd.DataFrame:
@@ -685,7 +874,7 @@ def _load_cad_adjusted_prices(
             series_by_ticker[ticker] = pd.Series(dtype=float, name=ticker)
             continue
         adjusted = prices["adj_close"].astype(float)
-        if is_usd_listed(ticker):
+        if (currencies or {}).get(ticker, "CAD") == "USD":
             start = adjusted.index.min().date().isoformat()
             end = adjusted.index.max().date().isoformat()
             try:
@@ -745,8 +934,14 @@ def _price_row_on_or_before(prices: pd.DataFrame, target_date: pd.Timestamp) -> 
     return (pd.Timestamp(eligible.index[-1]), float(price))
 
 
-def _price_to_cad(db_path: Path | str, ticker: str, price_date: pd.Timestamp, price: float) -> float:
-    if not is_usd_listed(ticker):
+def _price_to_cad(
+    db_path: Path | str,
+    ticker: str,
+    price_date: pd.Timestamp,
+    price: float,
+    currency: str,
+) -> float:
+    if currency != "USD":
         return float(price)
     fx_rate = _load_fx_rate_on_date(db_path, price_date)
     return float(price) / fx_rate
@@ -816,8 +1011,12 @@ def _load_fx_series(db_path: Path | str, start_date: str, end_date: str) -> pd.S
     return frame.set_index("date")["rate"].astype(float)
 
 
-def _latest_holdings_snapshot(holdings: pd.DataFrame, day: pd.Timestamp) -> pd.DataFrame:
-    eligible = holdings[holdings["date"] <= day]
+def _latest_holdings_snapshot(
+    holdings: pd.DataFrame,
+    day: pd.Timestamp,
+    effective_next_day: bool = False,
+) -> pd.DataFrame:
+    eligible = holdings[holdings["date"] < day] if effective_next_day else holdings[holdings["date"] <= day]
     if eligible.empty:
         return eligible
     latest_date = eligible["date"].max()
@@ -829,6 +1028,30 @@ def _active_holdings(snapshot: pd.DataFrame) -> pd.DataFrame:
         return snapshot
     weights = _weights_to_decimal(snapshot["weight"])
     return snapshot[weights != 0].reset_index(drop=True)
+
+
+def _snapshot_weights(snapshot: pd.DataFrame) -> dict[str, float]:
+    active = _active_holdings(snapshot).copy()
+    if active.empty:
+        return {}
+    weights = _weights_to_decimal(active["weight"])
+    if (weights < 0).any():
+        raise PerformanceDataError("Negative holdings weights are not supported by the long-only performance model.")
+    if float(weights.sum()) > 1.000001:
+        snapshot_date = pd.Timestamp(active["date"].iloc[0]).date().isoformat()
+        raise PerformanceDataError(f"Holdings weights exceed 100% for snapshot {snapshot_date}.")
+    return {
+        str(ticker): float(weight)
+        for ticker, weight in zip(active["ticker"], weights)
+        if float(weight) != 0.0
+    }
+
+
+def _holding_currency(holdings: pd.DataFrame, ticker: str) -> str:
+    values = holdings.loc[holdings["ticker"] == ticker, "currency"].dropna().astype(str).str.upper().unique()
+    if len(values) != 1 or values[0] not in {"CAD", "USD"}:
+        raise PerformanceDataError(f"Holding currency is missing or inconsistent for {ticker}.")
+    return str(values[0])
 
 
 def _weights_to_decimal(weights: pd.Series) -> pd.Series:

@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from contextlib import closing
 from dataclasses import dataclass
+from datetime import date, timedelta
 import math
+import os
 from pathlib import Path
 import sqlite3
 
 import pandas as pd
 
 from sma_dashboard.db import PROJECT_ROOT, connect
+from sma_dashboard.batch_ingestion import DEFAULT_MANIFEST_PATH, load_manifest
 from sma_dashboard.performance import BENCHMARK_TICKER, CALCULATED_START_DATE
 
 
@@ -27,7 +30,9 @@ PERFORMANCE_RANGE_OPTIONS = (
 )
 COMPRESSED_TRADING_AXIS_RANGES = {"5D", "1M", "6M", "YTD", "QTD", "1Y"}
 CALENDAR_AXIS_RANGES = {"5Y", "10Y", "Since Inception"}
-DASHBOARD_DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "db" / "sma_dashboard.db"
+DASHBOARD_DEFAULT_DB_PATH = Path(
+    os.environ.get("SMA_DASHBOARD_DB", PROJECT_ROOT / "data" / "db" / "sma_dashboard.db")
+)
 BENCHMARK_REFRESH_COMMAND = (
     "python refresh_benchmark.py --db data/db/sma_dashboard.db "
     f"--benchmark {BENCHMARK_TICKER} --start-date {CALCULATED_START_DATE}"
@@ -43,6 +48,7 @@ REQUIRED_DASHBOARD_TABLES = {
 DISPLAY_LABELS = {
     "date": "Date",
     "ticker": "Ticker",
+    "currency": "Currency",
     "weight": "Weight",
     "weight_decimal": "Weight",
     "action": "Action",
@@ -98,9 +104,43 @@ class BenchmarkPriceCoverage:
         return self.row_count > 0
 
 
+@dataclass(frozen=True)
+class MarketDataRefreshSummary:
+    holding_tickers: tuple[str, ...]
+    benchmark_ticker: str
+    holding_price_rows_written: int
+    fx_rows_written: int
+    benchmark_rows_written: int
+    latest_holding_price_before: str | None
+    latest_holding_price_after: str | None
+    latest_benchmark_price_before: str | None
+    latest_benchmark_price_after: str | None
+    missing_holding_price_tickers_after: tuple[str, ...] = ()
+    failed_tickers: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def rows_written(self) -> int:
+        return self.holding_price_rows_written + self.fx_rows_written + self.benchmark_rows_written
+
+    @property
+    def refreshed_anything(self) -> bool:
+        return self.rows_written > 0
+
+
+@dataclass(frozen=True)
+class DashboardFreshness:
+    latest_model_update_date: str | None
+    latest_current_holding_price_date: str | None
+    latest_benchmark_price_date: str | None
+    latest_calculated_return_date: str | None
+    current_holding_price_status: str = "unknown"
+    missing_current_holding_price_tickers: tuple[str, ...] = ()
+
+
 SETUP_COMMANDS = [
     "python init_db.py --db data/db/sma_dashboard.db",
-    "python load_seeded_returns.py --file data/raw/<local_seeded_returns.csv> --db data/db/sma_dashboard.db --cutoff-date 2025-01-31",
+    "python load_seeded_returns.py --file data/raw/seeded_returns.csv --db data/db/sma_dashboard.db --cutoff-date 2025-01-31",
     "python ingestion.py --file data/raw/<model_update.xlsx> --db data/db/sma_dashboard.db --config config/column_mapping.json --ticker-overrides config/ticker_overrides.local.json",
     BENCHMARK_REFRESH_COMMAND,
 ]
@@ -180,6 +220,105 @@ def database_overview(db_path: Path | str = DASHBOARD_DEFAULT_DB_PATH) -> dict[s
     }
 
 
+def get_dashboard_freshness(
+    db_path: Path | str = DASHBOARD_DEFAULT_DB_PATH,
+    benchmark_ticker: str = BENCHMARK_TICKER,
+) -> DashboardFreshness:
+    price_dates = _current_holding_price_dates(db_path)
+    missing_tickers = tuple(ticker for ticker, latest_date in price_dates.items() if latest_date is None)
+    return DashboardFreshness(
+        latest_model_update_date=_latest_holding_snapshot_date(db_path),
+        latest_current_holding_price_date=_latest_complete_current_holding_price_date(price_dates),
+        latest_benchmark_price_date=_latest_price_date(db_path, benchmark_ticker),
+        latest_calculated_return_date=_latest_calculated_return_date(db_path),
+        current_holding_price_status=_current_holding_price_status(price_dates),
+        missing_current_holding_price_tickers=missing_tickers,
+    )
+
+
+def refresh_dashboard_market_data(
+    db_path: Path | str = DASHBOARD_DEFAULT_DB_PATH,
+    benchmark_ticker: str = BENCHMARK_TICKER,
+) -> MarketDataRefreshSummary:
+    """Refresh current holdings, required FX, and benchmark prices for dashboard use."""
+    from sma_dashboard.ingestion import refresh_market_data
+    from sma_dashboard.performance import refresh_benchmark_prices_with_summary
+
+    tickers = tuple(_current_active_holding_tickers(db_path))
+    latest_holding_before = _latest_current_holding_price_date(db_path)
+    latest_benchmark_before = _latest_price_date(db_path, benchmark_ticker)
+    holding_rows = 0
+    fx_rows = 0
+    benchmark_rows = 0
+    failed_tickers: list[str] = []
+    warnings: list[str] = []
+
+    if not tickers:
+        warnings.append("No current holdings found; holding price refresh skipped.")
+
+    for ticker in tickers:
+        try:
+            ticker_price_rows, ticker_fx_rows = refresh_market_data([ticker], db_path)
+            holding_rows += ticker_price_rows
+            fx_rows += ticker_fx_rows
+        except Exception as exc:
+            failed_tickers.append(ticker)
+            warnings.append(f"{ticker}: market-data refresh failed: {exc}")
+
+    benchmark_start = _next_refresh_start(latest_benchmark_before, CALCULATED_START_DATE)
+    if date.fromisoformat(benchmark_start) <= date.today():
+        try:
+            benchmark_result = refresh_benchmark_prices_with_summary(
+                db_path=db_path,
+                benchmark_ticker=benchmark_ticker,
+                start_date=benchmark_start,
+            )
+            benchmark_rows = benchmark_result.rows_written
+        except Exception as exc:
+            warnings.append(f"{benchmark_ticker}: benchmark refresh failed: {exc}")
+
+    return MarketDataRefreshSummary(
+        holding_tickers=tickers,
+        benchmark_ticker=benchmark_ticker,
+        holding_price_rows_written=holding_rows,
+        fx_rows_written=fx_rows,
+        benchmark_rows_written=benchmark_rows,
+        latest_holding_price_before=latest_holding_before,
+        latest_holding_price_after=_latest_current_holding_price_date(db_path),
+        latest_benchmark_price_before=latest_benchmark_before,
+        latest_benchmark_price_after=_latest_price_date(db_path, benchmark_ticker),
+        missing_holding_price_tickers_after=_missing_current_holding_price_tickers(db_path),
+        failed_tickers=tuple(failed_tickers),
+        warnings=tuple(warnings),
+    )
+
+
+def pending_model_update_notice(
+    db_path: Path | str = DASHBOARD_DEFAULT_DB_PATH,
+    manifest_path: Path | str = DEFAULT_MANIFEST_PATH,
+) -> str | None:
+    path = Path(manifest_path)
+    if not path.exists():
+        return None
+    latest_holding = _latest_holding_snapshot_date(db_path)
+    if latest_holding is None:
+        return None
+    try:
+        entries = load_manifest(path)
+    except Exception as exc:
+        return f"Could not inspect model update manifest: {exc}"
+    if not entries:
+        return None
+    latest_manifest = max(entry.model_date for entry in entries)
+    if latest_manifest <= latest_holding:
+        return None
+    return (
+        f"Model update manifest includes updates through {latest_manifest}, "
+        f"but the latest ingested holdings snapshot is {latest_holding}. "
+        "Ingest model updates deliberately before relying on refreshed market data."
+    )
+
+
 def get_calculated_benchmark_price_coverage(
     db_path: Path | str = DASHBOARD_DEFAULT_DB_PATH,
     benchmark_ticker: str = BENCHMARK_TICKER,
@@ -205,6 +344,115 @@ def get_calculated_benchmark_price_coverage(
         max_date=row[2],
         start_date=start_date,
     )
+
+
+def _latest_holding_snapshot_date(db_path: Path | str) -> str | None:
+    try:
+        with closing(connect(db_path)) as conn:
+            return conn.execute("SELECT MAX(date) FROM holdings").fetchone()[0]
+    except sqlite3.Error:
+        return None
+
+
+def _current_active_holding_tickers(db_path: Path | str) -> list[str]:
+    latest = _latest_holding_snapshot_date(db_path)
+    if latest is None:
+        return []
+    try:
+        with closing(connect(db_path)) as conn:
+            frame = pd.read_sql_query(
+                """
+                SELECT ticker, weight
+                FROM holdings
+                WHERE date = ?
+                ORDER BY ticker
+                """,
+                conn,
+                params=(latest,),
+            )
+    except sqlite3.Error:
+        return []
+    if frame.empty:
+        return []
+    weights = frame["weight"].astype(float)
+    if weights.abs().max() > 1.0 or weights.abs().sum() > 1.5:
+        weights = weights / 100.0
+    return frame.loc[weights != 0, "ticker"].astype(str).tolist()
+
+
+def _latest_current_holding_price_date(db_path: Path | str) -> str | None:
+    return _latest_complete_current_holding_price_date(_current_holding_price_dates(db_path))
+
+
+def _current_holding_price_dates(db_path: Path | str) -> dict[str, str | None]:
+    tickers = _current_active_holding_tickers(db_path)
+    if not tickers:
+        return {}
+    placeholders = ", ".join("?" for _ in tickers)
+    try:
+        with closing(connect(db_path)) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT ticker, MAX(date) AS latest_date
+                FROM prices
+                WHERE ticker IN ({placeholders})
+                GROUP BY ticker
+                """,
+                tickers,
+            ).fetchall()
+    except sqlite3.Error:
+        return {}
+    latest_by_ticker = {ticker: None for ticker in tickers}
+    latest_by_ticker.update({str(ticker): latest_date for ticker, latest_date in rows})
+    return latest_by_ticker
+
+
+def _latest_complete_current_holding_price_date(price_dates: dict[str, str | None]) -> str | None:
+    if not price_dates or any(latest_date is None for latest_date in price_dates.values()):
+        return None
+    return min(str(latest_date) for latest_date in price_dates.values() if latest_date is not None)
+
+
+def _current_holding_price_status(price_dates: dict[str, str | None]) -> str:
+    if not price_dates:
+        return "no_current_holdings"
+    if any(latest_date is None for latest_date in price_dates.values()):
+        return "missing_prices"
+    return "complete"
+
+
+def _missing_current_holding_price_tickers(db_path: Path | str) -> tuple[str, ...]:
+    price_dates = _current_holding_price_dates(db_path)
+    return tuple(ticker for ticker, latest_date in price_dates.items() if latest_date is None)
+
+
+def _latest_price_date(db_path: Path | str, ticker: str) -> str | None:
+    try:
+        with closing(connect(db_path)) as conn:
+            return conn.execute("SELECT MAX(date) FROM prices WHERE ticker = ?", (ticker,)).fetchone()[0]
+    except sqlite3.Error:
+        return None
+
+
+def _latest_calculated_return_date(db_path: Path | str) -> str | None:
+    try:
+        from sma_dashboard.performance import calculate_twr_series_with_quality
+
+        result = calculate_twr_series_with_quality(db_path, strict=False)
+    except Exception:
+        return None
+    if result.data.empty:
+        return None
+    calculated = result.data[result.data["phase"] == "calculated"]
+    if calculated.empty:
+        return None
+    return str(calculated["date"].max())
+
+
+def _next_refresh_start(latest_date: str | None, fallback: str) -> str:
+    if latest_date is None:
+        return fallback
+    return (date.fromisoformat(latest_date) + timedelta(days=1)).isoformat()
 
 
 def format_percent(value: float | None, decimals: int = 2) -> str:
@@ -276,7 +524,9 @@ def apply_display_labels(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def format_holdings_table(holdings: pd.DataFrame) -> pd.DataFrame:
-    display = holdings[[column for column in ("date", "ticker", "weight") if column in holdings.columns]].copy()
+    display = holdings[
+        [column for column in ("date", "ticker", "currency", "weight") if column in holdings.columns]
+    ].copy()
     if "date" in display:
         display["date"] = display["date"].map(format_date)
     if "weight" in display:
@@ -306,6 +556,57 @@ def format_valuation_table(valuations: pd.DataFrame) -> pd.DataFrame:
     if "market_cap" in display:
         display["market_cap"] = display["market_cap"].map(format_currency_cad)
     return apply_display_labels(display)
+
+
+def prepare_valuation_table_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename columns and format market cap for display.
+
+    - Renames columns for readability
+    - Formats market cap from scientific notation to readable currency (C$X,XXX,XXX)
+    - Keeps all other numeric columns in numeric form for Streamlit formatting
+    """
+    df = df.copy()
+
+    # Rename columns for display
+    df = df.rename(columns={
+        "ticker": "Ticker",
+        "weight": "Weight",
+        "pe_trailing": "Trailing P/E",
+        "pe_forward": "Forward P/E",
+        "pb": "Price / Book",
+        "ev_ebitda": "EV / EBITDA",
+        "dividend_yield": "Dividend Yield",
+        "market_cap": "Market Cap (CAD)",
+    })
+
+    # Preserve numeric dtypes for columns formatted by Streamlit, including
+    # columns whose current values are all missing.
+    for column in (
+        "Weight",
+        "Trailing P/E",
+        "Forward P/E",
+        "Price / Book",
+        "EV / EBITDA",
+        "Dividend Yield",
+    ):
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+
+    # Select only display columns (in order)
+    display_cols = [
+        "Ticker", "Weight", "Trailing P/E", "Forward P/E",
+        "Price / Book", "EV / EBITDA", "Dividend Yield", "Market Cap (CAD)"
+    ]
+    df = df[[col for col in display_cols if col in df.columns]]
+
+    # Format market cap: convert from scientific notation to readable currency string
+    # (e.g., 8.303890e+10 → C$83,038,900,000)
+    if "Market Cap (CAD)" in df.columns:
+        df["Market Cap (CAD)"] = df["Market Cap (CAD)"].apply(
+            lambda x: f"C${x:,.0f}" if pd.notna(x) else None
+        )
+
+    return df
 
 
 def format_weighted_valuation_averages(averages: dict[str, float | None]) -> pd.DataFrame:
