@@ -1,12 +1,13 @@
 # SMA Oversight Dashboard
 
 [![Tests](https://github.com/bran-hub/sma-dashboard/actions/workflows/tests.yml/badge.svg)](https://github.com/bran-hub/sma-dashboard/actions/workflows/tests.yml)
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://sma-dashboard.streamlit.app/)
 ![Python](https://img.shields.io/badge/python-3.11%E2%80%933.13-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **A privacy-first Python data pipeline and Streamlit dashboard for independently auditing a separately managed account.** It converts periodic Excel model updates and stored market data into a reproducible CAD performance record, holdings view, trade log, risk dashboard, valuation overview, and portfolio assistant.
 
-[Run the synthetic demo](#run-the-synthetic-demo-locally) · [Review the methodology](docs/METHODOLOGY.md) · [See the architecture](docs/ARCHITECTURE.md)
+[Explore the live synthetic demo](https://sma-dashboard.streamlit.app/) · [Review the methodology](docs/METHODOLOGY.md) · [See the architecture](docs/ARCHITECTURE.md)
 
 ![SMA Dashboard overview](docs/images/dashboard-overview.png)
 
@@ -27,7 +28,7 @@ The result is less about another charting app and more about trustworthy analyti
 
 ## 60-second tour
 
-1. [Run the synthetic demo](#run-the-synthetic-demo-locally); the database is built locally from deterministic synthetic fixtures.
+1. Open the [live synthetic demo](https://sma-dashboard.streamlit.app/); the database is built from deterministic synthetic fixtures.
 2. Review cumulative performance, trailing returns, drawdowns, and rolling risk against the S&P/TSX Composite.
 3. Inspect holdings, weight drift, valuation, model-update history, and the normalized trade log.
 4. Ask the offline assistant “What are the largest holdings?”, “How has the portfolio performed?”, or “Summarize the latest manager commentary.”
