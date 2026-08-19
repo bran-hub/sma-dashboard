@@ -89,7 +89,7 @@ class DashboardSupportTests(unittest.TestCase):
         self.assertEqual(path, PROJECT_ROOT / "data" / "db" / "custom.sqlite")
 
     def test_absolute_db_path_is_preserved(self) -> None:
-        absolute = Path("C:/tmp/sma_dashboard_test.db")
+        absolute = (Path.cwd() / "data/db/sma_dashboard_test.db").resolve()
 
         self.assertEqual(resolve_dashboard_db_path(absolute), absolute)
 
