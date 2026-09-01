@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 560" role="img" aria-labelledby="title desc">
+  <title id="title">SMA Oversight Dashboard data flow</title>
+  <desc id="desc">Excel model updates are parsed and validated. Valid updates and price and foreign exchange data are written through an atomic SQLite transaction. The transaction supports performance and risk analytics, holdings and valuation views, and deterministic portfolio tools, which feed the Streamlit dashboard. Rejected rows are recorded in an audit.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0 L0 6 L9 3 Z" fill="#64748b"/>
+    </marker>
+    <style>
+      .canvas { fill: #f8fafc; }
+      .node { fill: #fff; stroke: #64748b; stroke-width: 2; }
+      .process { fill: #eff6ff; stroke: #2563eb; }
+      .storage { fill: #ecfdf5; stroke: #059669; }
+      .output { fill: #f5f3ff; stroke: #7c3aed; }
+      .warning { fill: #fff7ed; stroke: #ea580c; }
+      .edge { fill: none; stroke: #64748b; stroke-width: 2.5; marker-end: url(#arrow); }
+      .label { fill: #0f172a; font: 600 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-anchor: middle; }
+      .small { fill: #475569; font: 500 15px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-anchor: middle; }
+      .edge-label { fill: #475569; font: 600 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-anchor: middle; }
+    </style>
+  </defs>
+  <rect class="canvas" width="1400" height="560" rx="16"/>
+  <path class="edge" d="M210 180 H260"/>
+  <path class="edge" d="M470 180 H510"/>
+  <path class="edge" d="M610 180 H660"/>
+  <path class="edge" d="M560 230 V400 H490"/>
+  <path class="edge" d="M650 440 H750 V290"/>
+  <path class="edge" d="M870 230 H910 V105 H940"/>
+  <path class="edge" d="M870 230 H940"/>
+  <path class="edge" d="M870 230 H910 V355 H940"/>
+  <path class="edge" d="M1160 105 H1190 V230 H1210"/>
+  <path class="edge" d="M1160 230 H1210"/>
+  <path class="edge" d="M1160 355 H1190 V230 H1210"/>
+  <text class="edge-label" x="636" y="164">Yes</text>
+  <text class="edge-label" x="534" y="318">No</text>
+  <rect class="node" x="40" y="130" width="170" height="100" rx="12"/>
+  <text class="label" x="125" y="171">Excel model</text>
+  <text class="label" x="125" y="196">updates</text>
+  <rect class="node process" x="260" y="130" width="210" height="100" rx="12"/>
+  <text class="label" x="365" y="168">Parse and validate</text>
+  <text class="small" x="365" y="195">in memory</text>
+  <path class="node" d="M560 120 L610 180 L560 240 L510 180 Z"/>
+  <text class="label" x="560" y="186">Valid?</text>
+  <rect class="node storage" x="660" y="170" width="210" height="120" rx="12"/>
+  <text class="label" x="765" y="210">Atomic SQLite</text>
+  <text class="label" x="765" y="235">transaction</text>
+  <rect class="node warning" x="270" y="400" width="220" height="80" rx="12"/>
+  <text class="label" x="380" y="435">Rejected-row audit</text>
+  <text class="small" x="380" y="458">invalid records</text>
+  <rect class="node" x="490" y="400" width="160" height="80" rx="12"/>
+  <text class="label" x="570" y="434">Prices and FX</text>
+  <text class="small" x="570" y="458">stored market data</text>
+  <rect class="node output" x="940" y="55" width="220" height="100" rx="12"/>
+  <text class="label" x="1050" y="94">CAD performance</text>
+  <text class="label" x="1050" y="119">and risk engine</text>
+  <rect class="node output" x="940" y="180" width="220" height="100" rx="12"/>
+  <text class="label" x="1050" y="219">Holdings, trades,</text>
+  <text class="label" x="1050" y="244">and valuation</text>
+  <rect class="node output" x="940" y="305" width="220" height="100" rx="12"/>
+  <text class="label" x="1050" y="344">Deterministic</text>
+  <text class="label" x="1050" y="369">portfolio tools</text>
+  <rect class="node process" x="1210" y="180" width="150" height="100" rx="12"/>
+  <text class="label" x="1285" y="219">Streamlit</text>
+  <text class="label" x="1285" y="244">dashboard</text>
+</svg>

@@ -37,20 +37,7 @@ The demo contains 16 holdings rows, 12 trades, 1,840 stored price observations, 
 
 ## Data flow
 
-```mermaid
-flowchart LR
-    A[Excel model updates] --> B[Parse and validate in memory]
-    B --> C{Valid?}
-    C -->|No| D[Rejected-row audit]
-    C -->|Yes| E[Atomic SQLite transaction]
-    F[Prices and FX] --> E
-    E --> G[CAD performance and risk engine]
-    E --> H[Holdings, trades, valuation]
-    E --> I[Deterministic portfolio tools]
-    G --> J[Streamlit dashboard]
-    H --> J
-    I --> J
-```
+![Data flow from Excel model updates and stored market data through SQLite analytics to the Streamlit dashboard](docs/images/data-flow.svg)
 
 | Layer | Implementation |
 |---|---|
